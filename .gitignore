@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.spec
+build/
+dist/
+程序/
+captures/
+work/
+runtime.log
+diagnostics.json
+*.exe
+*.zip
+

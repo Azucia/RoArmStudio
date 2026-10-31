@@ -1,0 +1,42 @@
+[
+  {
+    "name": "PySide6",
+    "version": "6.8.3",
+    "license": "LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only"
+  },
+  {
+    "name": "PySide6_Essentials",
+    "version": "6.8.3",
+    "license": "LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only"
+  },
+  {
+    "name": "PySide6_Addons",
+    "version": "6.8.3",
+    "license": "LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only"
+  },
+  {
+    "name": "shiboken6",
+    "version": "6.8.3",
+    "license": "LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only"
+  },
+  {
+    "name": "numpy",
+    "version": "2.4.6",
+    "license": "See package notices"
+  },
+  {
+    "name": "opencv-python",
+    "version": "5.0.0.93",
+    "license": "Apache 2.0"
+  },
+  {
+    "name": "pyserial",
+    "version": "3.5",
+    "license": "BSD"
+  },
+  {
+    "name": "pyorbbecsdk2",
+    "version": "2.0.18",
+    "license": "See package notices"
+  }
+]
