@@ -6,8 +6,8 @@ RoArm-M3-Pro 与双相机 Windows 桌面工作台。
 
 进入 [Releases 下载页面](https://github.com/Azucia/RoArmStudio/releases/latest)：
 
-- **RoArmStudio-0.3.0-Setup-x64.exe**：推荐，双击安装，不需要 Python 或管理员权限。
-- **RoArmStudio-0.3-Windows.zip**：免安装完整包，解压后打开 `RoArmStudio/程序/RoArmStudio/RoArmStudio.exe`，保留 `_internal` 文件夹。
+- **RoArmStudio-0.4.0-Setup-x64.exe**：推荐，双击安装，不需要 Python 或管理员权限。
+- **RoArmStudio-0.4-Windows.zip**：免安装完整包，解压后打开 `RoArmStudio/程序/RoArmStudio/RoArmStudio.exe`，保留 `_internal` 文件夹。
 - GitHub 自动生成的 **Source code** 压缩包仅含源码，不是可直接运行的软件。
 
 系统：Windows 10 1809 或更高版本 / Windows 11，x64。
@@ -23,7 +23,7 @@ RoArm-M3-Pro 与双相机 Windows 桌面工作台。
 - **示教回放**：记录实际关节轨迹，保存并自动载入，低速回放、倍率和随时停止。
 - **设备**：扭矩保持、补光灯和实际反馈。
 
-连接、相机、采集保存默认折叠。右侧显示 AR0234、Gemini RGB、深度和对齐后的 RGB-D 叠加。
+浅粉至浅蓝的玻璃背景与白色半透明卡片，14 px 正文、按钮描边与轮盘按压反馈。连接、相机、采集保存默认折叠。右侧显示 AR0234、Gemini RGB、深度和对齐后的 RGB-D 叠加。
 
 ## 连接
 
@@ -35,7 +35,7 @@ XYZ 逆运动学由机械臂固件执行。方向盘点按或键盘按下一次�
 
 ## 当前验证范围
 
-v0.3.0 完成 12 项离线检查及打包 EXE 启动检查。开发时未连接 M3-Pro、AR0234 与 Gemini 2；真实运动、相机兼容性、D2C 质量，以及网页控制时出现的肩部下垂问题尚未实机验证。
+v0.4.0 完成 13 项离线检查及打包 EXE 启动检查。开发时未连接 M3-Pro、AR0234 与 Gemini 2；真实运动、相机兼容性、D2C 质量，以及网页控制时出现的肩部下垂问题尚未实机验证。
 
 安装包没有代码签名。软件不会自动改写机械臂或相机固件。
 

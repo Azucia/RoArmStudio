@@ -11,12 +11,13 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont, QImage, QPixmap
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QPushButton,
     QHBoxLayout, QVBoxLayout, QGridLayout, QComboBox, QSpinBox, QDoubleSpinBox,
-    QGroupBox, QPlainTextEdit, QScrollArea, QFileDialog, QMessageBox, QSlider, QTabWidget)
+    QGroupBox, QPlainTextEdit, QScrollArea, QFileDialog, QMessageBox, QSlider, QTabWidget, QFrame)
 from serial.tools import list_ports
 from backend import Shared, Arm, UVC, Gemini, Recorder, KEYS, NAMES, LIMITS, joint_command, hold_command, depth_views
 from backend import all_command
 from controls import Controls
 from jogpad import CartesianPad
+from appearance import STYLE, GlassCanvas, CameraScreen, enable_native_backdrop, soft_shadow
 
 BASE = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).resolve().parent.parent
 
@@ -32,7 +33,7 @@ class Foldout(QWidget):
         layout.setSpacing(2)
         self.toggle = QPushButton('▸  '+self.title)
         self.toggle.setCheckable(True)
-        self.toggle.setStyleSheet('text-align:left;padding:10px;font-weight:600')
+        self.toggle.setObjectName('foldout')
         self.toggle.toggled.connect(self.expand)
         layout.addWidget(self.toggle)
         layout.addWidget(content)
@@ -43,16 +44,26 @@ class Foldout(QWidget):
         self.toggle.setText(('▾  ' if checked else '▸  ')+self.title)
 
 
-class View(QGroupBox):
-    def __init__(self, title, hint):
-        super().__init__(title)
+class View(QFrame):
+    def __init__(self, title, tag):
+        super().__init__()
+        self.setObjectName('cameraCard')
+        soft_shadow(self)
         layout = QVBoxLayout(self)
-        self.image = QLabel(hint)
-        self.image.setAlignment(Qt.AlignCenter)
-        self.image.setMinimumSize(250, 150)
-        self.image.setStyleSheet('background:#0a1019;color:#61718a;border-radius:8px')
+        layout.setContentsMargins(14, 14, 14, 12)
+        layout.setSpacing(10)
+        header = QHBoxLayout()
+        name = QLabel(title)
+        name.setObjectName('cameraTitle')
+        header.addWidget(name)
+        header.addStretch()
+        kind = QLabel(tag)
+        kind.setObjectName('cameraTag')
+        header.addWidget(kind)
+        layout.addLayout(header)
+        self.image = CameraScreen()
         self.meta = QLabel('等待连接')
-        self.meta.setStyleSheet('color:#8d9bb0;font-size:11px')
+        self.meta.setObjectName('cameraMeta')
         layout.addWidget(self.image, 1)
         layout.addWidget(self.meta)
 
@@ -69,30 +80,41 @@ class Window(QMainWindow):
         super().__init__()
         self.setWindowTitle('RoArm Studio · M3-Pro / 双相机工作台')
         self.resize(1440, 940)
+        if sys.platform == 'win32' and sys.getwindowsversion().build >= 22000:
+            self.setAttribute(Qt.WA_TranslucentBackground)
         self.shared = Shared()
         self.arm = self.uvc = self.gemini = self.recorder = None
         self.workers = []
         self.last_frames = {}
         self.controls = None
         self.folder = BASE/'captures'
-        root = QWidget()
+        root = GlassCanvas()
         self.setCentralWidget(root)
         outer = QVBoxLayout(root)
+        outer.setContentsMargins(20, 12, 20, 18)
+        outer.setSpacing(16)
         top = QHBoxLayout()
         title = QLabel('RoArm Studio')
-        title.setStyleSheet('font-size:25px;font-weight:700;color:#f0f5ff')
+        title.setObjectName('appTitle')
         top.addWidget(title)
-        top.addWidget(QLabel('M3-PRO  /  VISION WORKSPACE'))
+        subtitle = QLabel('M3-Pro  ·  双相机')
+        subtitle.setObjectName('subtitle')
+        top.addWidget(subtitle)
         top.addStretch()
         self.status = QLabel('离线 · 连接不会自动运动')
+        self.status.setObjectName('connectionStatus')
         top.addWidget(self.status)
         outer.addLayout(top)
         body = QHBoxLayout()
+        body.setSpacing(16)
         outer.addLayout(body, 1)
         sidebar = QWidget()
+        sidebar.setObjectName('sidebar')
+        soft_shadow(sidebar, radius=30, opacity=33, offset=8)
         left = QVBoxLayout(sidebar)
-        left.setContentsMargins(0, 0, 0, 0)
-        sidebar.setFixedWidth(405)
+        left.setContentsMargins(14, 14, 14, 14)
+        left.setSpacing(12)
+        sidebar.setFixedWidth(420)
         body.addWidget(sidebar)
         settings = QWidget()
         side = QVBoxLayout(settings)
@@ -102,7 +124,7 @@ class Window(QMainWindow):
         scroll.setWidgetResizable(True)
         scroll.setWidget(settings)
         scroll.setMinimumHeight(140)
-        box = QGroupBox('01  机械臂连接')
+        box = QGroupBox('机械臂连接')
         l = QVBoxLayout(box)
         row = QHBoxLayout()
         self.ports = QComboBox()
@@ -116,7 +138,7 @@ class Window(QMainWindow):
         section = Foldout(box)
         self.settings_sections.append(section)
         side.addWidget(section)
-        box = QGroupBox('关节角度 · 原生坐标')
+        box = QGroupBox('')
         self.joint_panel = box
         l = QVBoxLayout(box)
         l.addWidget(QLabel('原生角度 · 夹爪角度减小时张开'))
@@ -167,12 +189,13 @@ class Window(QMainWindow):
         self.acc.setToolTip('单位：100 步/秒²；只用于关节控制与回放')
         row.addWidget(self.acc)
         l.addLayout(row)
+        l.addStretch()
         row = QHBoxLayout()
         self.hold_btn = self.button(row, '停止运动 / 回放', self.hold)
         self.hold_btn.setObjectName('stop')
         self.teach_btn = self.button(row, '释放扭矩 · 手动示教', self.teach)
         l.addLayout(row)
-        box = QGroupBox('02  相机连接')
+        box = QGroupBox('相机连接')
         l = QVBoxLayout(box)
         row = QHBoxLayout()
         row.addWidget(QLabel('AR0234 / UVC 索引'))
@@ -186,7 +209,7 @@ class Window(QMainWindow):
         section = Foldout(box)
         self.settings_sections.append(section)
         side.addWidget(section)
-        box = QGroupBox('03  采集与保存')
+        box = QGroupBox('采集与保存')
         l = QVBoxLayout(box)
         self.path_label = QLabel(str(self.folder))
         self.path_label.setWordWrap(True)
@@ -204,10 +227,9 @@ class Window(QMainWindow):
         right = QVBoxLayout()
         body.addLayout(right, 1)
         grid = QGridLayout()
-        self.views = [View('AR0234  /  手上视角', 'HAND CAMERA\n打开 AR0234 后显示实时画面'),
-                      View('GEMINI 2  /  RGB', 'COLOR\n打开 Gemini 2 后显示彩色画面'),
-                      View('GEMINI 2  /  深度', 'DEPTH\n毫米深度 · 无效像素显示为黑色'),
-                      View('GEMINI 2  /  RGB-D 叠加', 'ALIGNED RGB-D\n深度对齐到 RGB 后叠加')]
+        grid.setSpacing(14)
+        self.views = [View('手上视角', 'AR0234'), View('彩色画面', 'Gemini 2 · RGB'),
+                      View('深度画面', 'Gemini 2 · Depth'), View('彩色与深度', 'RGB-D')]
         for i, view in enumerate(self.views):
             grid.addWidget(view, i//2, i%2)
         right.addLayout(grid, 1)
@@ -215,7 +237,7 @@ class Window(QMainWindow):
         self.control_tabs = QTabWidget()
         self.control_tabs.addTab(self.cartesian_pad, 'XYZ')
         self.control_tabs.addTab(self.joint_panel, '关节角度')
-        self.control_tabs.setFixedHeight(510)
+        self.control_tabs.setFixedHeight(580)
         left.addWidget(self.control_tabs)
         left.addWidget(scroll, 1)
         row = QHBoxLayout()
@@ -234,7 +256,7 @@ class Window(QMainWindow):
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(250)
-        self.log.setMaximumHeight(100)
+        self.log.setMaximumHeight(66)
         right.addWidget(self.log)
         self.controls = Controls(self)
         while self.controls.tabs.count():
@@ -247,6 +269,14 @@ class Window(QMainWindow):
         self.timer.timeout.connect(self.tick)
         self.timer.start(100)
         self.note('就绪。未连接设备；所有画面与读数均来自实际设备。')
+        QTimer.singleShot(100, self.apply_backdrop)
+
+    def apply_backdrop(self):
+        self.centralWidget().native_backdrop = enable_native_backdrop(self)
+        self.centralWidget().update()
+
+    def showEvent(self, event):
+        super().showEvent(event)
 
     def button(self, layout, text, fn):
         btn = QPushButton(text)
@@ -406,7 +436,7 @@ class Window(QMainWindow):
         self.teach_btn.setEnabled(fresh and not playing)
         self.teach_btn.setText('结束示教 · 锁定当前位置' if teaching else '释放扭矩 · 手动示教')
         self.arm_state.setText('反馈正常 · 手动示教' if fresh and teaching else '反馈正常 · USB 串口' if fresh else '等待反馈 / 离线')
-        self.status.setText('机械臂在线 · 实际反馈' if fresh else '离线 / 等待反馈 · 无自动运动')
+        self.status.setText('●  机械臂已连接' if fresh else '○  机械臂未连接')
         if self.shared.pose:
             for label, key in zip(self.actual, KEYS):
                 label.setText(f'{math.degrees(self.shared.pose[key]):.1f}°'+('' if fresh else ' 旧'))
@@ -443,20 +473,6 @@ class Window(QMainWindow):
         event.accept()
 
 
-STYLE = '''
-QWidget {background:#111925;color:#dce6f5;font-family:"Microsoft YaHei UI";font-size:12px;}
-QMainWindow {background:#111925;}
-QGroupBox {border:1px solid #29374b;border-radius:10px;margin-top:15px;padding:12px 8px 7px;font-weight:600;}
-QGroupBox::title {subcontrol-origin:margin;left:12px;padding:0 5px;color:#95b7e4;}
-QPushButton {background:#25364c;border:1px solid #354b65;border-radius:6px;padding:7px 9px;}
-QPushButton:hover {background:#345273;border-color:#5a95cc;}
-QPushButton:disabled {color:#586476;background:#1a2432;border-color:#263244;}
-QPushButton#stop {background:#63333b;border-color:#b25965;color:white;font-weight:600;}
-QComboBox,QSpinBox,QDoubleSpinBox {background:#0d1520;border:1px solid #354357;border-radius:5px;padding:5px;}
-QPlainTextEdit {background:#0b121d;border:1px solid #29374b;border-radius:8px;color:#91a6c0;}
-QScrollArea {border:none;} QSlider::groove:horizontal {height:5px;background:#2a3e56;}
-QSlider::handle:horizontal {width:14px;margin:-5px 0;background:#65c9be;border-radius:7px;}
-'''
 
 
 def main():

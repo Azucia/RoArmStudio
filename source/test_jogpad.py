@@ -4,6 +4,7 @@ import unittest
 from PySide6.QtCore import Qt, QPointF, QEvent
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import QApplication
+from PySide6.QtTest import QTest
 from app import Window
 from jogpad import XYDisc
 from backend import pose_command
@@ -27,6 +28,23 @@ class DummyArm:
 
 
 class JogTests(unittest.TestCase):
+    def test_press_and_release_feedback_without_motion(self):
+        disc = XYDisc()
+        disc.resize(240, 240)
+        disc.show()
+        APP.processEvents()
+        cx, cy, radius = disc.geometry_values()
+        position = QPointF(cx+radius*.8, cy).toPoint()
+        commands = []
+        disc.jog.connect(lambda axis, distance: commands.append((axis, distance)))
+        QTest.mousePress(disc, Qt.LeftButton, pos=position)
+        self.assertEqual(disc.pressed, (0, 10))
+        self.assertEqual(commands, [])
+        QTest.mouseRelease(disc, Qt.LeftButton, pos=position)
+        QTest.qWait(180)
+        self.assertIsNone(disc.pressed)
+        disc.close()
+
     def test_disc_hit_regions(self):
         disc = XYDisc()
         disc.resize(220, 220)
@@ -57,6 +75,7 @@ class JogTests(unittest.TestCase):
         self.assertEqual(w.arm.sent[-1]['y'], 1)
         pad.eventFilter(w, key(Qt.Key_D, Qt.ShiftModifier))
         self.assertEqual(w.arm.sent[-1]['x'], 245)
+        self.assertEqual(pad.disc.pressed, (0, 10))
         count = len(w.arm.sent)
         pad.eventFilter(w, key(Qt.Key_D, repeat=True))
         self.assertEqual(len(w.arm.sent), count)
