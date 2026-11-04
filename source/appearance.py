@@ -3,7 +3,7 @@ import ctypes
 import sys
 from PySide6.QtCore import Qt, QRectF
 from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPen
-from PySide6.QtWidgets import QWidget, QLabel, QGraphicsDropShadowEffect
+from PySide6.QtWidgets import QWidget, QLabel, QGraphicsDropShadowEffect, QSizePolicy
 
 
 class GlassCanvas(QWidget):
@@ -14,6 +14,10 @@ class GlassCanvas(QWidget):
 
     def paintEvent(self, event):
         painter = QPainter(self)
+        theme=getattr(self,"theme","color")
+        if theme!="color":
+            painter.fillRect(self.rect(),QColor("#182028" if theme=="dark" else "#f3f5f7"))
+            return
         tint = QLinearGradient(0, 0, self.width(), self.height()*.35)
         tint.setColorAt(0, QColor('#fbf5ee'))
         tint.setColorAt(.3, QColor('#f6edf1'))
@@ -66,12 +70,18 @@ class CameraScreen(QLabel):
         self.setObjectName('cameraScreen')
         self.setAlignment(Qt.AlignCenter)
         self.setMinimumSize(250, 150)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        self.setAttribute(Qt.WA_OpaquePaintEvent)
 
     def paintEvent(self, event):
-        if self.pixmap() and not self.pixmap().isNull():
-            super().paintEvent(event)
-            return
         painter = QPainter(self)
+        if self.pixmap() and not self.pixmap().isNull():
+            painter.fillRect(self.rect(), QColor('#11151b'))
+            pixmap = self.pixmap()
+            painter.drawPixmap((self.width()-pixmap.width())//2, (self.height()-pixmap.height())//2, pixmap)
+            return
+        dark=getattr(self.window().centralWidget(),'theme','light')=='dark'
+        painter.fillRect(self.rect(), QColor('#27333c' if dark else '#e6ebf5'))
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setPen(Qt.NoPen)
         painter.setBrush(QColor(255, 255, 255, 37))
@@ -140,3 +150,35 @@ QMessageBox,QFileDialog,QInputDialog {background:#edf0fa;}
 '''
 
 
+
+def theme_style(key):
+    compact = """
+    QTabBar::tab {padding:6px 7px;margin:0 2px 5px 0;border-radius:6px;}
+    QPushButton:checked {border:2px solid #43849f;}
+    QPushButton#themeIcon {padding:0;min-height:0;border-radius:7px;font-size:19px;}
+    QCheckBox#inverseMode {border:2px solid #55899e;border-radius:8px;padding:10px;font-weight:600;}
+    QMenu {background:#f5f7fa;color:#24323c;border:1px solid #8595a1;padding:3px;}
+    QMenu::item {padding:5px 16px;}
+    QMenu::item:selected {background:#d6e7ef;color:#24323c;}
+    """
+    if key=='color':
+        return STYLE+compact
+    dark=key=='dark'
+    surface='#232d36' if dark else '#ffffff'
+    text='#e5e9ee' if dark else '#24323c'
+    muted='#b3bfca' if dark else '#56646e'
+    edge='#465561' if dark else '#cdd6dc'
+    field='#303d49' if dark else '#f4f6f8'
+    accent='#3a5667' if dark else '#d6e7ef'
+    return STYLE+compact+f"""
+    QMenu {{background:{surface};color:{text};}}
+    QCheckBox#inverseMode {{background:{accent};color:{text};}}
+    QWidget,QLabel#appTitle,QLabel#cameraTitle,QLabel#coordinates {{color:{text};}}
+    QWidget#sidebar,QFrame#cameraCard,QMessageBox,QFileDialog {{background:{surface};border-radius:10px;border-color:{edge};}}
+    QLabel#quiet,QLabel#subtitle,QLabel#cameraMeta,QLabel#cameraTag,QLabel#connectionStatus {{color:{muted};background:transparent;}}
+    QPushButton,QPushButton#foldout,QComboBox,QSpinBox,QDoubleSpinBox,QPlainTextEdit,QComboBox QAbstractItemView {{color:{text};background:{field};border-color:{edge};border-radius:6px;}}
+    QPushButton:hover,QPushButton:checked,QPushButton#foldout:checked,QTabBar::tab:selected,QPushButton#primary {{background:{accent};color:{text};}}
+    QTabBar::tab {{color:{muted};background:{surface};}}
+    QPushButton:disabled {{color:{muted};background:{surface};}}
+    QPushButton#stop {{color:{'#ffdae0' if dark else '#712739'};background:{'#653c46' if dark else '#f9e3e7'};}}
+    """

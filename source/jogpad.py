@@ -4,6 +4,9 @@ from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QEvent, QTimer
 from PySide6.QtGui import QPainter, QColor, QPen, QFont, QPainterPath
 from PySide6.QtWidgets import QWidget, QGroupBox, QHBoxLayout, QVBoxLayout, QLabel, QPushButton, QApplication, QLineEdit, QAbstractSpinBox, QPlainTextEdit, QStackedWidget, QDoubleSpinBox, QFormLayout
 from backend import pose_command
+from PySide6.QtWidgets import QCheckBox,QScrollArea
+from host_direct import prepare, holding_offset
+from host_control import TargetIntent
 
 
 class XYDisc(QWidget):
@@ -23,6 +26,8 @@ class XYDisc(QWidget):
         self.hovered = None
         self.pressed = None
         self.press_generation = 0
+        self.drag_origin = None
+        self.dragged = False
         self.setMouseTracking(True)
 
     def geometry_values(self):
@@ -41,6 +46,16 @@ class XYDisc(QWidget):
         return axis, sign*step
 
     def mouseMoveEvent(self, event):
+        if self.drag_origin is not None:
+            delta=event.globalPosition()-self.drag_origin
+            if delta.manhattanLength()>=QApplication.startDragDistance():
+                self.dragged=True
+            if self.dragged:
+                self.pressed=None
+                if self.scroll_parent:
+                    self.scroll_parent.verticalScrollBar().setValue(self.scroll_origin-round(delta.y()))
+                self.update()
+                return
         self.hovered = self.hit(event.position())
         self.update()
 
@@ -52,17 +67,29 @@ class XYDisc(QWidget):
         if event.button() != Qt.LeftButton:
             return
         self.setFocus()
+        self.drag_origin=event.globalPosition()
+        self.dragged=False
+        self.scroll_parent=self.parentWidget()
+        while self.scroll_parent and not isinstance(self.scroll_parent,QScrollArea):
+            self.scroll_parent=self.scroll_parent.parentWidget()
+        if self.scroll_parent:
+            self.scroll_origin=self.scroll_parent.verticalScrollBar().value()
         action = self.hit(event.position())
         if action is not None:
             self.pressed = action
             self.press_generation += 1
             self.update()
-        if action == 'home' and self.motion_enabled:
-            self.home.emit()
-        elif action is not None and self.motion_enabled:
-            self.jog.emit(*action)
-
     def mouseReleaseEvent(self, event):
+        if event.button()!=Qt.LeftButton or self.drag_origin is None:
+            return
+        moved=(event.globalPosition()-self.drag_origin).manhattanLength()
+        self.drag_origin=None
+        action=self.hit(event.position())
+        if self.motion_enabled and not self.dragged and moved<QApplication.startDragDistance() and action==self.pressed:
+            if action=='home':
+                self.home.emit()
+            elif action is not None:
+                self.jog.emit(*action)
         self.release_feedback()
 
     def release_feedback(self):
@@ -95,6 +122,7 @@ class XYDisc(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         cx, cy, radius = self.geometry_values()
+        dark=self.window().property("uiTheme")=="dark"
         for ring, (inner, outer, step) in enumerate(((.24, .64, 1), (.64, 1., 10))):
             for direction, (axis, sign) in enumerate(((0, 1), (1, 1), (0, -1), (1, -1))):
                 start = direction*90-43
@@ -109,13 +137,14 @@ class XYDisc(QWidget):
                 path.closeSubpath()
                 hover = self.hovered == (axis, sign*step) and self.motion_enabled
                 pressed = self.pressed == (axis, sign*step)
-                p.fillPath(path, QColor('#aab9e4' if pressed else '#bfcbed' if hover else '#d4daf0' if ring == 0 else '#e0e4f3'))
+                colors=('#517a90','#405e72','#334a5a','#293c49') if dark else ('#aab9e4','#bfcbed','#d4daf0','#e0e4f3')
+                p.fillPath(path,QColor(colors[0 if pressed else 1 if hover else 2 if ring==0 else 3]))
                 p.setPen(QPen(QColor('#8195ca' if pressed else '#bac5e1'), 2 if pressed else 1))
                 p.drawPath(path)
                 angle = math.radians(direction*90)
                 distance = radius*(inner+outer)/2
                 tx, ty = cx+distance*math.cos(angle), cy-distance*math.sin(angle)
-                p.setPen(QColor('#4f5e91' if self.motion_enabled else '#8490ad'))
+                p.setPen(QColor(('#f1f4f7' if self.motion_enabled else '#becbd6') if dark else ('#4f5e91' if self.motion_enabled else '#8490ad')))
                 p.setFont(QFont('Microsoft YaHei UI', 11))
                 text = ('X' if axis == 0 else 'Y')+('+' if sign > 0 else '−')+f'{step}'
                 p.drawText(QRectF(tx-29, ty-13, 58, 26), Qt.AlignCenter, text)
@@ -135,6 +164,8 @@ class CartesianPad(QGroupBox):
     def __init__(self, owner):
         super().__init__('')
         self.owner = owner
+        self.target_intent = TargetIntent()
+        self.jog_offset = [0.0]*6
         layout = QVBoxLayout(self)
         self.position = QLabel('X  —     Y  —     Z  —')
         self.position.setObjectName('coordinates')
@@ -194,14 +225,40 @@ class CartesianPad(QGroupBox):
         hint.setObjectName('quiet')
         hint.setWordWrap(True)
         info.addWidget(hint)
+        self.control_settings = QWidget()
+        control_layout = QVBoxLayout(self.control_settings)
+        self.computer_mode = QCheckBox('电脑逆解（发送关节角）')
+        self.computer_mode.setChecked(True)
+        self.computer_mode.toggled.connect(self.computer_toggled)
+        self.computer_mode.setToolTip('电脑一次算出完整关节角，调用“全关节到目标”的同一接口和速度参数；Z 前馈量由下方设置。')
+        self.computer_mode.setObjectName("inverseMode")
+        bias_row = QFormLayout()
+        self.z_feedforward = QDoubleSpinBox()
+        self.z_feedforward.setRange(0, 50)
+        self.z_feedforward.setSingleStep(1)
+        self.z_feedforward.setSuffix(' mm')
+        self.z_feedforward.setToolTip('仅电脑逆解使用。相对点动接管时保留原保持目标已有的抬升量，前馈只补足差额。0 为关闭，修改后在下次移动时生效。')
+        bias_row.addRow('带载 Z 前馈', self.z_feedforward)
+        control_layout.addLayout(bias_row)
+        grip_row = QHBoxLayout()
+        self.grip_close = QPushButton('收紧夹爪')
+        self.grip_open = QPushButton('松开夹爪')
+        self.grip_close.setToolTip('仅控制夹爪到闭合位置；手臂关节保持原样。')
+        self.grip_open.setToolTip('仅打开夹爪，不释放机械臂关节扭矩。')
+        self.grip_close.clicked.connect(lambda: owner.grip(True))
+        self.grip_open.clicked.connect(lambda: owner.grip(False))
+        grip_row.addWidget(self.grip_close)
+        grip_row.addWidget(self.grip_open)
+        info.addLayout(grip_row)
         info.addStretch()
         self.more = QPushButton('切换到精确 XYZ 输入')
         self.more.clicked.connect(self.switch_mode)
         info.addWidget(self.more)
         stop = QPushButton('停止运动 / 回放')
         stop.setObjectName('stop')
+        stop.setToolTip('取消后续定位或回放；最后一个小步目标仍可能继续完成，不释放扭矩。')
         stop.clicked.connect(owner.hold)
-        info.addWidget(stop)
+        control_layout.addWidget(stop)
         layout.addLayout(info)
         QApplication.instance().installEventFilter(self)
 
@@ -214,6 +271,7 @@ class CartesianPad(QGroupBox):
 
     def copy_xyz(self):
         try:
+            self.target_intent.clear()
             for target, value in zip(self.xyz_targets, self.actual()):
                 target.setValue(value)
         except ValueError as e:
@@ -223,9 +281,10 @@ class CartesianPad(QGroupBox):
         try:
             if self.owner.arm and (self.owner.arm.teaching or self.owner.arm.playing):
                 raise ValueError('请先结束示教或回放')
-            values = self.actual()
+            values = self.intent_values()
+            measured_angles = values[3:].copy()
             values[:3] = [target.value() for target in self.xyz_targets]
-            self.owner.arm.submit(pose_command(values))
+            self.send_xyz(values, measured_angles)
         except Exception as e:
             self.owner.error(e)
 
@@ -258,13 +317,50 @@ class CartesianPad(QGroupBox):
             raise ValueError('缺少新鲜的末端坐标反馈')
         return [pose[k] for k in fields[:3]]+[math.degrees(pose[k]) for k in fields[3:]]
 
+    def send_xyz(self, values, measured_angles, offset=None):
+        if self.computer_mode.isChecked():
+            if not self.owner.fresh():raise ValueError('缺少新鲜的关节反馈')
+            with self.owner.shared.lock:
+                measured=[self.owner.shared.pose[k] for k in ('b','s','e','t','r','g')]
+            bias=self.z_feedforward.value()
+            offset = [0.0]*6 if offset is None else offset
+            solve_values = [v+d for v,d in zip(values,offset)]
+            extra = max(0.0,bias-offset[2])
+            cmd,joints=prepare(solve_values,measured,self.owner.speed.value(),self.owner.acc.value(),extra)
+            # Internal routing flag is consumed by Arm before serializing JSON.
+            # Direct PC jogs retain intent; manual angle/home commands invalidate it.
+            self.owner.arm.submit(dict(cmd,_host_intent=True))
+            for widget,angle in zip(self.owner.targets,joints):widget.setValue(math.degrees(angle))
+            self.owner.shared.event(f'电脑逆解 Z目标 {values[2]:.2f} mm，前馈 +{bias:.1f} mm，保持偏移 {offset[2]:+.2f} mm，求解 Z {solve_values[2]+extra:.2f} mm，关节目标 {cmd}')
+            self.jog_offset = offset
+            self.target_intent.commit(values,self.intent_key())
+        else:
+            self.owner.arm.submit(pose_command(values,measured_angles))
+
+    def computer_toggled(self, checked):
+        self.z_feedforward.setEnabled(checked)
+        self.target_intent.clear()
+        if not checked and self.owner.arm and getattr(self.owner.arm,'host_busy',False):
+            self.owner.hold()
+
+    def intent_key(self):
+        return id(self.owner.arm),getattr(self.owner.arm,'reference_generation',0)
+
+    def intent_values(self):
+        actual=self.actual()
+        return self.target_intent.values(actual,self.intent_key()) if self.computer_mode.isChecked() else actual
+
     def move(self, axis, distance):
         try:
             if self.owner.arm and (self.owner.arm.teaching or self.owner.arm.playing):
                 raise ValueError('请先结束手动示教或停止回放')
-            values = self.actual()
+            values = self.intent_values()
+            measured_angles = values[3:].copy()
+            offset = self.jog_offset
+            if self.computer_mode.isChecked() and self.target_intent.key != self.intent_key():
+                offset = holding_offset(values,self.owner.arm.last_joint_target)
             values[axis] += distance
-            self.owner.arm.submit(pose_command(values))
+            self.send_xyz(values, measured_angles, offset)
             if axis in (0, 1):
                 self.disc.flash(axis, distance)
         except Exception as e:
@@ -275,9 +371,13 @@ class CartesianPad(QGroupBox):
         try:
             values = self.actual()
             self.position.setText('   '.join(f'{axis}  {value:.1f}' for axis, value in zip('XYZ', values)))
-            enabled = not self.owner.arm.teaching and not self.owner.arm.playing
+            enabled = (not self.owner.arm.teaching and not self.owner.arm.playing
+                       and not self.owner.arm.torque_pending and not self.owner.arm.torque_fault)
             self.state.setText('单位 mm · 实际反馈' if enabled else '示教 / 回放中 · 方向控制已暂停')
+            if getattr(self.owner.arm,'host_busy',False):
+                self.state.setText('电脑轨迹定位中 · 关节跟随检查')
         except ValueError:
+            self.target_intent.clear()
             self.position.setText('X  —     Y  —     Z  —')
             self.state.setText('离线 / 坐标过期 · 方向控制已暂停')
         self.disc.motion_enabled = enabled
@@ -286,3 +386,5 @@ class CartesianPad(QGroupBox):
             button.setEnabled(enabled)
         self.precise_read.setEnabled(enabled)
         self.precise_go.setEnabled(enabled)
+        self.grip_close.setEnabled(enabled)
+        self.grip_open.setEnabled(enabled)

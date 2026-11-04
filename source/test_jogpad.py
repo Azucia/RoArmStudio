@@ -16,6 +16,9 @@ class DummyArm:
     connected = True
     teaching = False
     playing = False
+    torque_pending = False
+    torque_fault = False
+    torque_state = '未确认'
 
     def __init__(self):
         self.sent = []
@@ -28,6 +31,56 @@ class DummyArm:
 
 
 class JogTests(unittest.TestCase):
+    def test_measured_gripper_over_limit_does_not_block_xyz(self):
+        w = Window()
+        w.cartesian_pad.computer_mode.setChecked(False)
+        errors=[]
+        w.error=lambda e: errors.append(str(e))
+        w.arm = DummyArm()
+        w.shared.pose = dict(T=1051, x=352.1467839, y=-2.160772722, z=212.3804383,
+                             tit=.027611654, b=-.006135923, s=.027611654,
+                             e=1.578466231, t=-.007669904, r=.001533981, g=3.149262558)
+        w.shared.pose_time = time.monotonic()
+        w.cartesian_pad.move(0, 1)
+        cmd = w.arm.sent[-1]
+        self.assertAlmostEqual(cmd['x'], 353.1467839)
+        self.assertAlmostEqual(cmd['g'], 3.149262558)
+        self.assertAlmostEqual(cmd['t'], .027611654)
+        w.cartesian_pad.switch_mode()
+        w.cartesian_pad.xyz_targets[2].setValue(213)
+        w.cartesian_pad.move_xyz()
+        self.assertAlmostEqual(w.arm.sent[-1]['g'], 3.149262558)
+        self.assertEqual(errors, [])
+        with self.assertRaises(ValueError):
+            pose_command([352, 0, 212, 0, 0, 181], [0, 0, 180.44])
+        with self.assertRaises(ValueError):
+            pose_command([901, 0, 212, 0, 0, 180.44], [0, 0, 180.44])
+        w.close()
+
+    def test_gripper_buttons_only_command_joint_six_and_obey_state(self):
+        w = Window()
+        errors=[]
+        w.error=lambda e: errors.append(str(e))
+        w.arm = DummyArm()
+        w.shared.pose = dict(T=1051, x=352, y=0, z=212, tit=0, b=0, s=0, e=1.57, t=0, r=0, g=3.14)
+        w.shared.pose_time = time.monotonic()
+        w.cartesian_pad.grip_close.click()
+        self.assertEqual(w.arm.sent[-1], dict(T=101, joint=6, rad=math.pi, spd=100, acc=5))
+        w.cartesian_pad.grip_open.click()
+        self.assertAlmostEqual(w.arm.sent[-1]['rad'],1.08)
+        for state in ('teaching', 'playing'):
+            before=len(w.arm.sent)
+            setattr(w.arm,state,True)
+            w.grip(True)
+            self.assertEqual(len(w.arm.sent),before)
+            setattr(w.arm,state,False)
+        before=len(w.arm.sent)
+        w.shared.pose_time = 0
+        w.grip(True)
+        self.assertEqual(len(w.arm.sent),before)
+        self.assertEqual(len(errors),3)
+        w.close()
+
     def test_press_and_release_feedback_without_motion(self):
         disc = XYDisc()
         disc.resize(240, 240)
@@ -59,6 +112,7 @@ class JogTests(unittest.TestCase):
 
     def test_keyboard_and_tabs_and_input_guard(self):
         w = Window()
+        w.cartesian_pad.computer_mode.setChecked(False)
         w.arm = DummyArm()
         w.shared.pose = dict(T=1051, x=235, y=0, z=234, tit=0, b=0, s=0, e=1.57, t=0, r=0, g=1.08)
         w.shared.pose_time = time.monotonic()
@@ -95,6 +149,7 @@ class JogTests(unittest.TestCase):
 
     def test_precise_xyz_keeps_orientation(self):
         w = Window()
+        w.cartesian_pad.computer_mode.setChecked(False)
         w.arm = DummyArm()
         w.shared.pose = dict(T=1051, x=235, y=1, z=234, tit=.2, b=0, s=0, e=1.57, t=0, r=.3, g=1.08)
         w.shared.pose_time = time.monotonic()
@@ -108,7 +163,7 @@ class JogTests(unittest.TestCase):
         self.assertAlmostEqual(command['t'], .2)
         self.assertAlmostEqual(command['r'], .3)
         self.assertAlmostEqual(command['g'], 1.08)
-        self.assertEqual(w.control_tabs.count(), 4)
+        self.assertEqual(w.control_tabs.tabText(3), "控制/连接")
         w.close()
 
 

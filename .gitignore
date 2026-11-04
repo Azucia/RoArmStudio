@@ -4,11 +4,12 @@ __pycache__/
 *.spec
 build/
 dist/
-程序/
+绋嬪簭/
 captures/
 work/
 runtime.log
 diagnostics.json
 *.exe
 *.zip
-
+diagnostics/
+Log/

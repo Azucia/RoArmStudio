@@ -28,6 +28,7 @@ class Controls(QDialog):
         outer.addWidget(self.tabs)
         self.motion_widgets = []
         self.make_actions()
+        self.device_page=QWidget()
         self.make_device_simple()
         row = QHBoxLayout()
         owner.button(row, '停止回放 / 保持当前位置', self.stop_playback).setObjectName('stop')
@@ -74,7 +75,7 @@ class Controls(QDialog):
 
     def make_actions(self):
         layout = self.page('示教与回放')
-        hint = QLabel('录制关节轨迹；需要画面时，另行展开“采集与保存”。')
+        hint = QLabel('录制关节角度，或载入已保存的轨迹。')
         hint.setWordWrap(True)
         layout.addWidget(hint)
         row = QHBoxLayout()
@@ -93,21 +94,21 @@ class Controls(QDialog):
         layout.addLayout(row)
         row = QHBoxLayout()
         row.addWidget(QLabel('回放倍率'))
-        self.factor = self.spin(.1, 1., .5, ' ×')
+        self.factor = self.spin(.1, 999., .5, ' ×')
         self.factor.setSingleStep(.1)
         row.addWidget(self.factor)
         self.button(row, '开始回放', self.play, True)
         layout.addLayout(row)
         self.play_state = QLabel('未开始')
         layout.addWidget(self.play_state)
-        text = QLabel('回放先低速到达首帧，再按时间推进，并受主界面速度上限约束。\n每段检查实际到位；通信中断或未到位时终止。实际时长可能长于录制。\n请先结束手动示教并托稳机械臂，再开始回放。')
+        text = QLabel('回放从首帧开始，速度受关节速度上限约束。\n请先结束手动示教并托稳机械臂。')
         text.setWordWrap(True)
         layout.addWidget(text)
         self.button(layout, '停止回放 / 保持当前位置', self.owner.hold).setObjectName('stop')
         layout.addStretch()
 
     def make_device_simple(self):
-        layout = self.page('设备与反馈')
+        layout = QVBoxLayout(self.device_page)
         layout.addWidget(QLabel('扭矩保持'))
         row = QHBoxLayout()
         self.button(row, '释放 / 恢复扭矩', self.owner.teach)
@@ -175,10 +176,7 @@ class Controls(QDialog):
 
 
     def torque_on(self):
-        if self.owner.arm and self.owner.arm.teaching:
-            self.owner.teach()
-        else:
-            self.send(dict(T=210, cmd=1))
+        self.owner.set_teaching(False)
 
 
 
@@ -199,6 +197,9 @@ class Controls(QDialog):
             lines = ['反馈正常'+(' · 手动示教' if teaching else ' · 回放中' if playing else '')]
             for name, key in zip(NAMES, KEYS):
                 lines.append(f'{name}  {math.degrees(pose[key]):.1f}°')
+            lines.append('扭矩状态：'+arm.torque_state)
+            for name, key in zip(NAMES, ('torswitchB','torswitchS','torswitchE','torswitchT','torswitchR','torswitchG')):
+                lines.append(f'{name}扭矩：'+{0:'关闭',1:'开启'}.get(pose.get(key),'未知'))
             for key in ('x', 'y', 'z'):
                 if isinstance(pose.get(key), (int, float)):
                     lines.append(f'{key.upper()}  {pose[key]:.1f} mm')

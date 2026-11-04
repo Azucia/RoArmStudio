@@ -4,3 +4,4 @@ numpy==2.4.6
 pyserial==3.5
 pyorbbecsdk2==2.0.18
 pyinstaller==6.22.3
+cv2-enumerate-cameras==1.4.0

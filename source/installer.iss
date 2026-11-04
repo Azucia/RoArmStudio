@@ -1,4 +1,4 @@
-#define MyAppVersion "0.4.0"
+#define MyAppVersion "1.0"
 #ifndef SourceRoot
   #define SourceRoot ".."
 #endif
@@ -8,21 +8,21 @@
 
 [Setup]
 AppId={{BB1807C1-D5CD-43E1-AB2A-E2563D50D8C9}
-AppName=RoArm Studio
+AppName=RoarmStudio
 AppVersion={#MyAppVersion}
-AppPublisher=RoArm Studio
-DefaultDirName={localappdata}\Programs\RoArmStudio
-DefaultGroupName=RoArm Studio
+AppPublisher=Azucia
+DefaultDirName={localappdata}\Programs\RoarmStudio
+DefaultGroupName=RoarmStudio
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0.17763
 OutputDir={#ReleaseOutput}
-OutputBaseFilename=RoArmStudio-{#MyAppVersion}-Setup-x64
+OutputBaseFilename=RoarmStudio-{#MyAppVersion}-Setup-x64
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
-UninstallDisplayIcon={app}\RoArmStudio.exe
+UninstallDisplayIcon={app}\RoarmStudio.exe
 CloseApplications=yes
 RestartApplications=no
 SetupLogging=yes
@@ -35,15 +35,16 @@ Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.i
 Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked
 
 [Files]
-Source: "{#SourceRoot}\程序\RoArmStudio\RoArmStudio.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#SourceRoot}\程序\RoArmStudio\_internal\*"; DestDir: "{app}\_internal"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SourceRoot}\程序\RoarmStudio\RoarmStudio.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourceRoot}\程序\RoarmStudio\_internal\*"; DestDir: "{app}\_internal"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SourceRoot}\assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion
 Source: "{#SourceRoot}\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#SourceRoot}\使用说明.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\RoArm Studio"; Filename: "{app}\RoArmStudio.exe"; WorkingDir: "{app}"
-Name: "{group}\Uninstall RoArm Studio"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\RoArm Studio"; Filename: "{app}\RoArmStudio.exe"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{group}\RoarmStudio"; Filename: "{app}\RoarmStudio.exe"; WorkingDir: "{app}"
+Name: "{group}\Uninstall RoarmStudio"; Filename: "{uninstallexe}"
+Name: "{autodesktop}\RoarmStudio"; Filename: "{app}\RoarmStudio.exe"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\RoArmStudio.exe"; Description: "Launch RoArm Studio"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\RoarmStudio.exe"; Description: "Launch RoarmStudio"; Flags: nowait postinstall skipifsilent
