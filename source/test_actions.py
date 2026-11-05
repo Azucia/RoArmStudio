@@ -64,6 +64,28 @@ class ActionTests(unittest.TestCase):
             self.assertIsNone(recorder.error)
             self.assertGreaterEqual(len(load_trajectory(recorder.path)), 2)
 
+    def test_loaded_shoulder_must_settle_and_large_error_still_stops(self):
+        from threading import Thread
+        shared=Shared()
+        arm=Arm(shared,'TEST')
+        arm.connected=True
+        player=Playback(shared,arm,[])
+        target=[0,0,1.57,0,0,3.14]
+        def simulate(degrees):
+            for _ in range(9):
+                with shared.lock:
+                    shared.pose=dict(zip(KEYS,target))
+                    shared.pose['s']=math.radians(degrees)
+                    shared.pose_time=time.monotonic()
+                time.sleep(.075)
+        worker=Thread(target=simulate,args=(5,));worker.start()
+        player.wait_target(target,1.5)
+        worker.join()
+        worker=Thread(target=simulate,args=(12,));worker.start()
+        with self.assertRaisesRegex(RuntimeError,'肩.*12.0'):
+            player.wait_target(target,.5)
+        worker.join()
+
     def test_replay_and_cancel_token(self):
         shared = Shared()
         with patch('backend.serial.Serial', MotionSerial):

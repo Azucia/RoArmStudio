@@ -31,7 +31,7 @@ RoarmStudio 是 Azucia 为 RoArm-M3-Pro 开发的 Windows 桌面工作台。**1.
 
 ## 使用
 
-Windows x64，从本仓库运行 1.0 源码：
+Windows x64 用户可以从 [1.0 发布页](https://github.com/Azucia/RoArmStudio/releases/tag/v1.0) 下载安装包或免安装版。电脑端源码启动方式：
 
 ```powershell
 py -m venv .venv
@@ -49,5 +49,7 @@ py -m venv .venv
 ## 下一步：给其他软件使用的 SDK
 
 计划把电脑端已验证的控制逻辑开放为 SDK。第一阶段拟提供连接与状态读取、绝对 XYZ 和相对点动、动作取消与错误反馈。外部视觉、自动化和采集软件可以复用同一套目标保持与带载补偿，不必各写一遍逆解。SDK 属于后续计划，1.0 提供桌面程序和源码。
+
+安全示教协议、可选固件源码和独立角度监视页分别见 [firmware](firmware) 与 [tools](tools)。
 
 By Azucia

@@ -93,7 +93,7 @@ class Window(QMainWindow):
         self.auto_paused = False
         self.pending_device = None
         self.camera_pause=set()
-        self.camera_next={}
+        self.camera_next={} 
         self.resize(1440, 940)
         if sys.platform == 'win32' and sys.getwindowsversion().build >= 22000:
             self.setAttribute(Qt.WA_TranslucentBackground)
@@ -542,7 +542,8 @@ class Window(QMainWindow):
     def teach(self):
         if not self.fresh():
             return
-        self.set_teaching(not self.arm.teaching)
+        off=all(self.shared.pose.get('torswitch'+k)==0 for k in ('B','S','E','T','R','G'))
+        self.set_teaching(not (self.arm.teaching or off))
 
     def set_teaching(self, release):
         if not self.fresh() or self.arm.torque_pending:
@@ -611,7 +612,7 @@ class Window(QMainWindow):
             btn.setEnabled(fresh and not teaching and not playing and not torque_busy)
         self.hold_btn.setEnabled(fresh and not teaching and not torque_busy)
         self.teach_btn.setEnabled(fresh and not playing and not (self.arm and self.arm.torque_pending))
-        self.teach_btn.setText('结束示教 · 锁定当前位置' if teaching else '释放扭矩 · 手动示教')
+        self.teach_btn.setText('恢复扭矩 · 锁定当前位置' if teaching or (fresh and all(self.shared.pose.get('torswitch'+k)==0 for k in ('B','S','E','T','R','G'))) else '释放扭矩 · 手动示教')
         self.arm_state.setText('反馈正常 · 手动示教' if fresh and teaching else '反馈正常 · USB 串口' if fresh else '等待反馈 / 离线')
         if fresh and (teaching or torque_busy or self.arm.torque_state != '未确认'):
             self.arm_state.setText(self.arm.torque_state)

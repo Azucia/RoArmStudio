@@ -3,7 +3,7 @@ import json
 import math
 import time
 from pathlib import Path
-from backend import Worker, KEYS, all_command, check_radians
+from backend import Worker, KEYS, NAMES, all_command, check_radians
 
 
 def load_trajectory(path, sdk=False):
@@ -87,22 +87,47 @@ class Playback(Worker):
     def ensure(self):
         if self.stop.is_set() or self.arm.epoch != self.token:
             raise InterruptedError('回放已停止')
-        if not self.arm.connected or time.monotonic()-self.shared.pose_time > .6:
-            raise RuntimeError('实际反馈中断，回放已终止')
+        if not self.arm.connected or time.monotonic()-self.shared.pose_time > 2:
+            raise RuntimeError('超过 2 秒未收到反馈，回放已终止')
+        pose=self.shared.pose or {}
+        if any(pose.get('torswitch'+k)==0 for k in ('B','S','E','T','R','G')):
+            raise RuntimeError('检测到关节扭矩关闭，请先恢复保持再回放')
 
     def send(self, values):
         self.ensure()
+        while time.monotonic()-self.shared.pose_time > .6:
+            self.ensure()
+            self.stop.wait(.03)
         self.arm.submit(all_command(values, self.speed, self.acc), token=self.token)
 
     def wait_target(self, target, timeout):
         end = time.monotonic()+timeout
+        anchor=None
+        stamp_before=self.shared.pose_time
         while True:
             self.ensure()
-            pose = self.shared.pose
-            if pose and all(abs(pose[k]-v) < .07 for k, v in zip(KEYS, target)):
-                return
+            with self.shared.lock:
+                stamp=self.shared.pose_time
+                pose=self.shared.pose
+            if pose and stamp>stamp_before:
+                q=[pose[k] for k in KEYS]
+                errors=[abs(v-t) for v,t in zip(q,target)]
+                if max(errors)<.07:
+                    return
+                # Only the loaded shoulder/elbow may settle slightly outside 4 degrees.
+                tolerances=(.07,math.radians(6),math.radians(6),.07,.07,.07)
+                if all(e<=limit for e,limit in zip(errors,tolerances)):
+                    if anchor is None or max(abs(v-w) for v,w in zip(q,anchor[1]))>math.radians(.35):
+                        anchor=(stamp,q)
+                    elif stamp-anchor[0]>=.45:
+                        self.shared.event('带载关节已停稳，按实测容差继续回放')
+                        return
+                else:
+                    anchor=None
             if time.monotonic() > end:
-                raise RuntimeError('未在预期时间到达目标，回放终止')
+                diffs=[abs(pose[k]-v) for k,v in zip(KEYS,target)]
+                i=diffs.index(max(diffs))
+                raise RuntimeError(f'{NAMES[i]}未到位：目标 {math.degrees(target[i]):.1f}°，实测 {math.degrees(pose[KEYS[i]]):.1f}°，回放已停止')
             self.stop.wait(.05)
 
     def run(self):
@@ -137,7 +162,7 @@ class Playback(Worker):
             with self.arm.command_lock:
                 if self.arm.epoch == self.token:
                     self.arm.cancel_replay()
-                    if self.arm.connected and time.monotonic()-self.shared.pose_time < .6:
+                    if self.error and self.arm.connected and time.monotonic()-self.shared.pose_time < .6 and all(self.shared.pose.get('torswitch'+k,1)==1 for k in ('B','S','E','T','R','G')):
                         try:
                             self.arm.submit(all_command([self.shared.pose[k] for k in KEYS], self.speed, self.acc))
                         except Exception as e:

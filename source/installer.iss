@@ -11,6 +11,8 @@ AppId={{BB1807C1-D5CD-43E1-AB2A-E2563D50D8C9}
 AppName=RoarmStudio
 AppVersion={#MyAppVersion}
 AppPublisher=Azucia
+VersionInfoVersion=1.0.0.0
+VersionInfoProductVersion=1.0.0.0
 DefaultDirName={localappdata}\Programs\RoarmStudio
 DefaultGroupName=RoarmStudio
 PrivilegesRequired=lowest
@@ -29,7 +31,9 @@ SetupLogging=yes
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
+#if FileExists(AddBackslash(CompilerPath) + "Languages\ChineseSimplified.isl")
 Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+#endif
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked

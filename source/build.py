@@ -1,7 +1,7 @@
 """Run with the Python environment containing requirements.txt."""
 import importlib.metadata
 import pathlib
-import site
+import shutil
 import subprocess
 import sys
 
@@ -13,7 +13,7 @@ args = [sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean', '--window
         '--workpath', str(destination/'work'/'studio-build'),
         '--specpath', str(destination/'work'),
         '--icon', str(destination/'assets/arm-drawing-rounded.ico'),
-        '--hidden-import', 'pyorbbecsdk', '--exclude-module', 'PySide6.QtWebEngineCore',
+        '--hidden-import', 'pyorbbecsdk', '--collect-binaries', 'cv2_enumerate_cameras', '--exclude-module', 'PySide6.QtWebEngineCore',
         '--exclude-module', 'PySide6.QtWebEngineWidgets',
         '--add-binary', f'{site_dir / "OrbbecSDK.dll"};.',
         '--add-data', f'{site_dir / "extensions"};extensions',
@@ -26,5 +26,4 @@ wrong_icu = destination/'程序'/'RoarmStudio'/'_internal'/'icuuc.dll'
 if wrong_icu.exists():
     wrong_icu.unlink()
 
-import shutil
 shutil.copytree(destination/"assets", wrong_icu.parent.parent/"assets", dirs_exist_ok=True)

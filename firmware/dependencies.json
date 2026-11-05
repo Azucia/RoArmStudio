@@ -1,0 +1,42 @@
+[
+  {
+    "name": "Adafruit GFX Library",
+    "version": "1.13.0",
+    "website": "https://github.com/adafruit/Adafruit-GFX-Library"
+  },
+  {
+    "name": "Adafruit SSD1306",
+    "version": "2.5.17",
+    "website": "https://github.com/adafruit/Adafruit_SSD1306"
+  },
+  {
+    "name": "Adafruit BusIO",
+    "version": "1.17.4",
+    "website": "https://github.com/adafruit/Adafruit_BusIO"
+  },
+  {
+    "name": "ESP Async WebServer",
+    "version": "3.12.1",
+    "website": "https://github.com/ESP32Async/ESPAsyncWebServer"
+  },
+  {
+    "name": "ArduinoJson",
+    "version": "7.4.2",
+    "website": "https://arduinojson.org/?utm_source=meta&utm_medium=library.properties"
+  },
+  {
+    "name": "Async TCP",
+    "version": "3.5.0",
+    "website": "https://github.com/ESP32Async/AsyncTCP.git"
+  },
+  {
+    "name": "INA219_WE",
+    "version": "1.4.1",
+    "website": "https://github.com/wollewald/INA219_WE"
+  },
+  {
+    "name": "SCServo",
+    "version": "1.0.2",
+    "website": "https://github.com/workloads/scservo"
+  }
+]

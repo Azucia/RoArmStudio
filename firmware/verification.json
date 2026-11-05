@@ -1,0 +1,108 @@
+{
+  "mac": "ec:c9:ff:f0:99:b0",
+  "sha256": "5bc22714ffc9af518e3e3dc7f2417a1bc1735fa001cccca11d37ef23d95d387d",
+  "angle": [
+    {
+      "T": 6261,
+      "servos": [
+        {
+          "id": 11,
+          "raw": 2044,
+          "deg": 0.3515625
+        },
+        {
+          "id": 12,
+          "raw": 2059,
+          "deg": 0.966796875
+        },
+        {
+          "id": 13,
+          "raw": 2048,
+          "deg": 0
+        },
+        {
+          "id": 14,
+          "raw": 2086,
+          "deg": 93.33984
+        },
+        {
+          "id": 15,
+          "raw": 2065,
+          "deg": 1.494140625
+        },
+        {
+          "id": 16,
+          "raw": 2051,
+          "deg": -0.263671875
+        },
+        {
+          "id": 17,
+          "raw": 2015,
+          "deg": 177.0996
+        }
+      ]
+    }
+  ],
+  "pose": [
+    {
+      "T": 1051,
+      "x": 347.4743606,
+      "y": 2.132102732,
+      "z": 194.45916,
+      "tit": 0.101242732,
+      "b": 0.006135923,
+      "s": 0.016873789,
+      "e": 1.629087597,
+      "t": 0.026077673,
+      "r": -0.004601942,
+      "g": 3.090971288,
+      "tB": -23,
+      "tS": 94,
+      "tE": 167,
+      "tT": 83,
+      "tR": 28,
+      "tG": -124,
+      "torswitchB": 1,
+      "torswitchS": 1,
+      "torswitchE": 1,
+      "torswitchT": 1,
+      "torswitchR": 1,
+      "torswitchG": 1,
+      "v": 1143
+    }
+  ],
+  "probe": [
+    {
+      "T": 2111,
+      "protocol": "studio-teach-v1",
+      "request": "install-probe",
+      "ok": true,
+      "blocked": false,
+      "states": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ]
+    }
+  ],
+  "update": [
+    {
+      "T": 6251,
+      "ok": true,
+      "error": "",
+      "protocol": "studio-serial-ota-v1",
+      "token": 0,
+      "offset": 0,
+      "size": 0,
+      "running": false,
+      "ready": false,
+      "paused": false,
+      "sha256": "",
+      "partition": "app1"
+    }
+  ]
+}

@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>RoArm · 关节角度</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#eff4f4;color:#193338;font:16px/1.55 system-ui,"Microsoft YaHei",sans-serif}main{max-width:780px;margin:4vh auto;padding:24px}header,section{background:white;border:1px solid #c9d8d8;border-radius:14px;padding:20px;margin-bottom:14px}h1{font-size:26px;margin:0}p{margin:7px 0;color:#486069}button{background:#12605f;color:white;border:0;padding:10px 16px;border-radius:8px;cursor:pointer}button:disabled{opacity:.45}.gap{font-size:34px;color:#105951;font-variant-numeric:tabular-nums}table{width:100%;border-collapse:collapse}td,th{padding:8px;text-align:right;border-bottom:1px solid #dfe8e8;font-variant-numeric:tabular-nums}th:first-child,td:first-child{text-align:left}small{color:#53686c}</style>
+<main><header><h1>RoArm 关节角度</h1><p>用 Edge 或 Chrome 打开。先在控制软件断开机械臂，再选择机械臂的 USB 串口。</p><button id="connect">连接机械臂</button> <button id="disconnect" disabled>断开</button> <span id="state" role="status">未连接</span></header>
+<section><strong>双肩角度差</strong><div class="gap" id="gap">—</div><small>肩主 ID 12 减肩从 ID 13。两颗背对背安装，肩从读数已换算到与肩主相同的方向。每次依次读取。</small></section>
+<section><table><thead><tr><th>关节</th><th>ID</th><th>实测角度</th><th>编码器原始值</th></tr></thead><tbody id="rows"></tbody></table><p id="stamp">等待新读数</p></section></main>
+<script>
+const names=['底座','肩主','肩从','肘','手腕俯仰','手腕旋转','夹爪'];
+const ui=id=>document.getElementById(id);
+let port,reader,writer,timer,reading,closing=false,last=0;
+function render(values=[]){
+ ui('rows').replaceChildren(...names.map((name,i)=>{
+  const v=values.find(x=>x.id===11+i),tr=document.createElement('tr');
+  for(const text of [name,11+i,Number.isFinite(v?.deg)?v.deg.toFixed(2)+'°':'—',v?.raw??'—']){
+   const td=document.createElement('td');td.textContent=text;tr.append(td);
+  }return tr;
+ }));
+ const a=values.find(x=>x.id===12)?.deg,b=values.find(x=>x.id===13)?.deg;
+ ui('gap').textContent=Number.isFinite(a)&&Number.isFinite(b)?(a-b).toFixed(2)+'°':'—';
+}
+async function receive(){
+ const decoder=new TextDecoder();let buffer='';
+ while(true){
+  const {done,value}=await reader.read();if(done)break;
+  buffer+=decoder.decode(value,{stream:true});const lines=buffer.split('\n');buffer=lines.pop().slice(-4096);
+  for(const line of lines){let d;try{d=JSON.parse(line.trim());}catch{continue;}
+   if(d.T!==6261||!Array.isArray(d.servos))continue;
+   last=Date.now();render(d.servos);ui('state').textContent='已连接';ui('stamp').textContent='最近读取 '+new Date(last).toLocaleTimeString();
+  }
+ }
+}
+async function stop(label){
+ if(closing)return;closing=true;clearTimeout(timer);ui('disconnect').disabled=true;
+ try{if(reader){await reader.cancel().catch(()=>{});await reading?.catch(()=>{});reader.releaseLock();}
+ if(writer)writer.releaseLock();if(port?.readable)await port.close();}catch{}
+ port=reader=writer=reading=null;last=0;render();ui('stamp').textContent='等待新读数';ui('state').textContent=label;ui('connect').disabled=false;closing=false;
+}
+async function poll(){
+ if(closing||!writer)return;
+ try{await writer.write(new TextEncoder().encode('{"T":626}\n'));
+ if(Date.now()-last>1600){render();ui('stamp').textContent='等待角度反馈';}
+ if(!closing)timer=setTimeout(poll,400);}catch{await stop('串口已断开');}
+}
+ui('connect').onclick=async()=>{
+ if(!navigator.serial){ui('state').textContent='请使用桌面 Edge 或 Chrome';return;}
+ ui('connect').disabled=true;
+ try{port=await navigator.serial.requestPort({filters:[{usbVendorId:0x10c4,usbProductId:0xea60}]});
+ await port.open({baudRate:115200});reader=port.readable.getReader();writer=port.writable.getWriter();
+ ui('state').textContent='串口已打开';ui('disconnect').disabled=false;
+ reading=receive();reading.then(()=>{if(!closing)void stop('串口已断开');},()=>{if(!closing)void stop('读取中断');});poll();
+ }catch(e){await stop('连接未完成 · '+e.message);}
+};
+ui('disconnect').onclick=()=>stop('已断开');render();
+</script></html>
