@@ -50,6 +50,6 @@ py -m venv .venv
 
 计划把电脑端已验证的控制逻辑开放为 SDK。第一阶段拟提供连接与状态读取、绝对 XYZ 和相对点动、动作取消与错误反馈。外部视觉、自动化和采集软件可以复用同一套目标保持与带载补偿，不必各写一遍逆解。SDK 属于后续计划，1.0 提供桌面程序和源码。
 
-安全示教协议、可选固件源码和独立角度监视页分别见 [firmware](firmware) 与 [tools](tools)。
+安全示教协议、可选固件源码和独立角度监视页分别见 [firmware](firmware) 与 [tools](tools)。完整目录、依赖及打包方法见[构建说明](docs/build.md)。USB 更新客户端可用 `python tools/test_update_firmware.py` 离线测试。
 
 By Azucia
