@@ -3,7 +3,7 @@ import json
 import math
 import time
 from pathlib import Path
-from backend import Worker, KEYS, NAMES, all_command, check_radians
+from backend import Worker, KEYS, NAMES, all_command, check_radians, FEEDBACK_TIMEOUT, torque_disabled
 
 
 def load_trajectory(path, sdk=False):
@@ -85,20 +85,28 @@ class Playback(Worker):
         self.error = None
 
     def ensure(self):
-        if self.stop.is_set() or self.arm.epoch != self.token:
+        if self.stop.is_set() or self.arm.stop.is_set() or self.arm.epoch != self.token:
             raise InterruptedError('回放已停止')
-        if not self.arm.connected or time.monotonic()-self.shared.pose_time > 2:
-            raise RuntimeError('超过 2 秒未收到反馈，回放已终止')
-        pose=self.shared.pose or {}
-        if any(pose.get('torswitch'+k)==0 for k in ('B','S','E','T','R','G')):
+        if not self.arm.connected or time.monotonic()-self.shared.pose_time > FEEDBACK_TIMEOUT:
+            raise RuntimeError('超过 0.6 秒未收到反馈，回放已终止；恢复连接后不会自动续播')
+        if self.arm.teaching or self.arm.torque_pending or self.arm.torque_fault:
+            raise RuntimeError('扭矩状态未确认，回放已终止')
+        if torque_disabled(self.shared.pose):
             raise RuntimeError('检测到关节扭矩关闭，请先恢复保持再回放')
 
     def send(self, values):
         self.ensure()
-        while time.monotonic()-self.shared.pose_time > .6:
+        receipt = self.arm.submit(all_command(values, self.speed, self.acc), token=self.token)
+        deadline = time.monotonic()+1
+        # Feedback can arrive before a queued command is written. Do not start
+        # arrival checks (or complete and clear the queue) for an unsent target.
+        while not receipt.done.wait(.01):
             self.ensure()
-            self.stop.wait(.03)
-        self.arm.submit(all_command(values, self.speed, self.acc), token=self.token)
+            if time.monotonic() > deadline:
+                raise RuntimeError('回放指令未确认完整写出串口，已取消后续动作')
+        self.ensure()
+        if receipt.error:
+            raise RuntimeError(receipt.error)
 
     def wait_target(self, target, timeout):
         end = time.monotonic()+timeout
@@ -162,8 +170,7 @@ class Playback(Worker):
             with self.arm.command_lock:
                 if self.arm.epoch == self.token:
                     self.arm.cancel_replay()
-                    if self.error and self.arm.connected and time.monotonic()-self.shared.pose_time < .6 and all(self.shared.pose.get('torswitch'+k,1)==1 for k in ('B','S','E','T','R','G')):
-                        try:
-                            self.arm.submit(all_command([self.shared.pose[k] for k in KEYS], self.speed, self.acc))
-                        except Exception as e:
-                            self.shared.event(f'回放结束保持指令未发送：{e}')
+                    # Keep the last motor target, including its load-holding bias.
+                    # Encoder angles are observations, not replacement targets.
+                    if self.error:
+                        self.shared.event('已取消回放待发动作；已发送的目标可能继续执行，未改写保持目标。')

@@ -1,0 +1,21 @@
+name: Offline regression tests
+on:
+  push:
+    branches: [main]
+    paths: ['source/**', 'tools/**', '.github/workflows/**']
+  pull_request:
+    paths: ['source/**', 'tools/**', '.github/workflows/**']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r source/requirements.txt
+      - run: python tools/run_tests.py

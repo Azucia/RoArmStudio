@@ -17,6 +17,11 @@ NAMES = ('底座', '肩部', '肘部', '腕部俯仰', '腕部旋转', '夹爪')
 # Conservative operating envelope, in firmware/native degrees (no SDK gripper inversion).
 LIMITS = ((-180, 180), (-90, 90), (0, 180), (-90, 90), (-180, 180), (math.degrees(1.08), 180))
 MOTION_TYPES = (101, 102, 1041)
+FEEDBACK_TIMEOUT = .6
+
+
+def torque_disabled(pose):
+    return any((pose or {}).get('torswitch'+k) == 0 for k in ('B', 'S', 'E', 'T', 'R', 'G'))
 
 
 def check_radians(values):
@@ -108,6 +113,23 @@ class Worker(threading.Thread):
         self.stop = threading.Event()
 
 
+class CommandReceipt:
+    """Local serial delivery result, not a device acknowledgement or arrival."""
+    def __init__(self):
+        self.done = threading.Event()
+        self.error = None
+
+    def finish(self, error=None):
+        self.error = error
+        self.done.set()
+
+
+def discard_command(command, reason):
+    receipt = command.get('_receipt')
+    if receipt is not None:
+        receipt.finish(reason)
+
+
 class Arm(Worker):
     def __init__(self, shared, port):
         super().__init__(shared)
@@ -153,7 +175,7 @@ class Arm(Worker):
             self.host_busy = False
             while not self.commands.empty():
                 try:
-                    self.commands.get_nowait()
+                    discard_command(self.commands.get_nowait(), '指令已取消')
                 except queue.Empty:
                     break
 
@@ -166,7 +188,7 @@ class Arm(Worker):
             return self.epoch
 
     def _submit(self, command, token=None):
-        if not self.connected:
+        if not self.connected or self.stop.is_set():
             raise ValueError('机械臂尚未连接')
         if token is not None and (token != self.epoch or not self.playing):
             raise ValueError('回放已取消')
@@ -176,6 +198,8 @@ class Arm(Worker):
             raise ValueError('扭矩状态正在确认或确认失败，已禁止运动')
         if self.teaching and command.get('T') in MOTION_TYPES:
             raise ValueError('请先结束手动示教')
+        if command.get('T') in MOTION_TYPES and torque_disabled(self.shared.pose):
+            raise ValueError('检测到关节扭矩关闭，请先确认恢复保持')
         if self.playing and token is None:
             raise ValueError('请先停止回放')
         # Replace pending motion, but preserve ordered device-setting commands.
@@ -186,17 +210,102 @@ class Arm(Worker):
                     pending = self.commands.get_nowait()
                     if pending.get('T') not in MOTION_TYPES:
                         settings.append(pending)
+                    else:
+                        discard_command(pending, '指令已被后续目标替代')
                 except queue.Empty:
                     break
             for pending in settings:
                 self.commands.put_nowait(pending)
         command = dict(command)
+        receipt = None
         if command.get('T') in MOTION_TYPES:
             command['_epoch'] = self.epoch
+            receipt = command['_receipt'] = CommandReceipt()
         try:
             self.commands.put_nowait(command)
         except queue.Full:
             raise ValueError('待发送设置较多，请稍后重试')
+        return receipt
+
+    def _write_pending(self, ser):
+        """Check cancellation and feedback again at the serial write boundary."""
+        with self.command_lock:
+            stale = time.monotonic()-self.shared.pose_time > FEEDBACK_TIMEOUT
+            if self.stop.is_set():
+                self.cancel_replay()
+                return
+            if stale and self.last_joint_target is not None:
+                self.last_joint_target = None
+                self.reference_generation += 1
+            if self.playing and (stale or torque_disabled(self.shared.pose)):
+                self.cancel_replay()
+                self.shared.event('反馈过期或关节扭矩关闭，已取消回放；不会自动续播。')
+            try:
+                cmd = self.commands.get_nowait()
+            except queue.Empty:
+                return
+            epoch = cmd.pop('_epoch', self.epoch)
+            host_intent = cmd.pop('_host_intent', False)
+            receipt = cmd.pop('_receipt', None)
+            rejected = None
+            if epoch != self.epoch:
+                rejected = '已丢弃取消前的运动指令'
+            elif cmd.get('T') in MOTION_TYPES and stale:
+                rejected = '反馈已过期，已丢弃运动指令'
+            elif cmd.get('T') in MOTION_TYPES and (self.teaching or self.torque_pending or
+                    self.torque_fault or torque_disabled(self.shared.pose)):
+                rejected = '扭矩未确认保持，已丢弃运动指令'
+            if rejected:
+                self.shared.event(rejected)
+                if receipt is not None:
+                    receipt.finish(rejected)
+            else:
+                packet = (json.dumps(cmd)+'\n').encode()
+                try:
+                    if ser.write(packet) != len(packet):
+                        raise IOError('串口指令未完整写出，控制基准已失效')
+                except Exception as e:
+                    self.last_joint_target = None
+                    self.reference_generation += 1
+                    if receipt is not None:
+                        receipt.finish(str(e))
+                    raise
+                self.trace('serial_write', command=public_command(cmd), host_intent=host_intent)
+                if cmd.get('T') == 102:
+                    self.last_joint_target = [cmd[k] for k in ('base', 'shoulder', 'elbow', 'wrist', 'roll', 'hand')]
+                elif cmd.get('T') == 101 and self.last_joint_target is not None:
+                    self.last_joint_target[int(cmd['joint'])-1] = cmd['rad']
+                elif cmd.get('T') in (1041, 210, 211):
+                    self.last_joint_target = None
+                if cmd.get('T') in MOTION_TYPES:
+                    self.command_sequence += 1
+                    if not self.host_busy and not host_intent:
+                        self.reference_generation += 1
+                self.shared.event('发送 '+json.dumps(public_command(cmd), ensure_ascii=False))
+                if receipt is not None:
+                    receipt.finish()
+
+    def _accept_pose(self, data):
+        with self.command_lock:
+            gap = time.monotonic()-self.shared.pose_time > FEEDBACK_TIMEOUT
+            if gap or any(data.get('torswitch'+key) != 1 for key in ('B', 'S', 'E', 'T', 'R', 'G')):
+                self.last_joint_target = None
+                self.reference_generation += 1
+            # Detect the gap before refreshing the timestamp, including when the
+            # serial thread itself was delayed and did not run its write guard.
+            if self.playing and (gap or torque_disabled(data)):
+                self.cancel_replay()
+                self.shared.event('反馈中断或关节扭矩关闭，已取消回放；不会自动续播。')
+            with self.shared.lock:
+                self.shared.pose = data
+                self.shared.pose_time = time.monotonic()
+                self.shared.pose_host_ns = time.time_ns()
+            if self.teaching and not self.torque_pending and not self.torque_fault:
+                switches = ('torswitchB', 'torswitchS', 'torswitchE', 'torswitchT', 'torswitchR', 'torswitchG')
+                if any(data.get(key) != 0 for key in switches):
+                    self.torque_fault = True
+                    self.torque_state = '示教扭矩状态异常 · 请继续托住'
+                    self.shared.event(self.torque_state)
 
     def run(self):
         ser = None
@@ -221,33 +330,7 @@ class Arm(Worker):
             awaiting_feedback = False
             buf = bytearray()
             while not self.stop.is_set():
-                try:
-                    cmd = self.commands.get_nowait()
-                    with self.command_lock:
-                        epoch = cmd.pop('_epoch', self.epoch)
-                        host_intent = cmd.pop('_host_intent', False)
-                        if epoch != self.epoch:
-                            self.shared.event('已丢弃取消前的运动指令')
-                        elif cmd.get('T') in MOTION_TYPES and time.monotonic()-self.shared.pose_time > .6:
-                            self.shared.event('反馈已过期，已丢弃运动指令')
-                        elif cmd.get('T') in MOTION_TYPES and (self.teaching or self.torque_pending or self.torque_fault):
-                            self.shared.event('扭矩未确认保持，已丢弃运动指令')
-                        else:
-                            ser.write((json.dumps(cmd)+'\n').encode())
-                            self.trace('serial_write',command=public_command(cmd),host_intent=host_intent)
-                            if cmd.get('T') == 102:
-                                self.last_joint_target = [cmd[k] for k in ('base','shoulder','elbow','wrist','roll','hand')]
-                            elif cmd.get('T') == 101 and self.last_joint_target is not None:
-                                self.last_joint_target[int(cmd['joint'])-1] = cmd['rad']
-                            elif cmd.get('T') in (1041,210,211):
-                                self.last_joint_target = None
-                            if cmd.get('T') in MOTION_TYPES:
-                                self.command_sequence += 1
-                                if not self.host_busy and not host_intent:
-                                    self.reference_generation += 1
-                            self.shared.event('发送 '+json.dumps(public_command(cmd), ensure_ascii=False))
-                except queue.Empty:
-                    pass
+                self._write_pending(ser)
                 if time.monotonic()-last_query >= (2 if awaiting_feedback else .1):
                     ser.write(b'{"T":105}\n')
                     last_query = time.monotonic()
@@ -264,20 +347,7 @@ class Arm(Worker):
                         if isinstance(data, dict) and valid_pose(data):
                             awaiting_feedback=False
                             self.trace('feedback',feedback=data)
-                            if (time.monotonic()-self.shared.pose_time > 1 or
-                                any(data.get('torswitch'+key) != 1 for key in ('B','S','E','T','R','G'))):
-                                self.last_joint_target = None
-                                self.reference_generation += 1
-                            with self.shared.lock:
-                                self.shared.pose = data
-                                self.shared.pose_time = time.monotonic()
-                                self.shared.pose_host_ns = time.time_ns()
-                            if self.teaching and not self.torque_pending and not self.torque_fault:
-                                switches = ('torswitchB','torswitchS','torswitchE','torswitchT','torswitchR','torswitchG')
-                                if any(data.get(key) != 0 for key in switches):
-                                    self.torque_fault = True
-                                    self.torque_state = '示教扭矩状态异常 · 请继续托住'
-                                    self.shared.event(self.torque_state)
+                            self._accept_pose(data)
                     except (ValueError, UnicodeError):
                         pass
                 if len(buf) > 65536:
@@ -286,8 +356,10 @@ class Arm(Worker):
             self.trace('connection_error',error=str(e))
             self.shared.event(f'机械臂连接错误：{e}')
         finally:
-            self.connected = False
-            self.last_joint_target = None
+            with self.command_lock:
+                self.connected = False
+                self.cancel_replay()
+                self.last_joint_target = None
             if ser:
                 ser.close()
             self.trace('session_end')

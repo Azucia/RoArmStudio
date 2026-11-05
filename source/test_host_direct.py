@@ -12,6 +12,7 @@ class FullFeedbackSerial(FakeSerial):
             p=dict(T=1051,**dict(zip(KEYS,[0,0,1.57,0,0,3.14])))
             p.update({'torswitch'+k:1 for k in ('B','S','E','T','R','G')})
             self.buffer.extend((json.dumps(p)+'\n').encode())
+        return len(raw)
 
 class Tests(unittest.TestCase):
     def test_xyz_every_axis_is_one_identical_native_angle_command(self):

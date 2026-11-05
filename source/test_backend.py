@@ -28,6 +28,7 @@ class FakeSerial:
         self.writes.append(cmd)
         if cmd['T'] == 105:
             self.buffer.extend((json.dumps(dict(T=1051, **dict(zip(KEYS, [0, 0, 1.57, 0, 0, 3.14]))))+'\r\n').encode())
+        return len(raw)
 
     def read(self, size):
         time.sleep(.001)
