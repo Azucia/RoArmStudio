@@ -8,8 +8,6 @@ from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import QWidget
 
 
-GRID_X = (-75, 675)  # mm; leave one cell behind the base
-GRID_Y = (-450, 450)
 GRID_STEP = 75
 
 
@@ -69,11 +67,13 @@ class ArmView(QWidget):
         self.setMinimumHeight(150)
         self.setAccessibleName('RoArm-M3 关节反馈姿态')
         self.view = view_matrix()
-        floor = np.array([(x, y, 0) for x in GRID_X for y in GRID_Y]) @ self.view
-        self.floor_min = floor[:, :2].min(axis=0)
-        self.floor_max = floor[:, :2].max(axis=0)
+        self.view_to_floor = np.linalg.inv(self.view[:2, :2])
+        # Keep the same viewing scale while extending the grid beyond this reference area.
+        floor = np.array([(x, y, 0) for x in (-75, 675) for y in (-450, 450)]) @ self.view
+        self.frame_min = floor[:, :2].min(axis=0)
+        self.frame_max = floor[:, :2].max(axis=0)
         # Reserve height for the arm so ordinary motion doesn't change the framing.
-        self.floor_max[1] = max(self.floor_max[1], 300)
+        self.frame_max[1] = max(self.frame_max[1], 300)
         self.angles = None
         self.triangles = None
         self.message = '等待机械臂反馈'
@@ -98,24 +98,31 @@ class ArmView(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor('#080b0f'))
-        lower, upper = self.floor_min, self.floor_max
+        lower, upper = self.frame_min, self.frame_max
         if self.triangles is not None:
             vertices = self.triangles[:, :, :2]
             lower = np.minimum(lower, vertices.min(axis=(0, 1)))
             upper = np.maximum(upper, vertices.max(axis=(0, 1)))
         left, bottom = lower
         right, top = upper
-        cx, cy = self.width() * .29, self.height() * .46
+        width, height = self.width(), self.height()
+        cx, cy = width * .29, height * .46
         margin = 12
-        scale = min((cx - margin) / -left, (self.width() - cx - margin) / right,
-                    (cy - margin) / top, (self.height() - cy - margin) / -bottom)
+        scale = min((cx - margin) / -left, (width - cx - margin) / right,
+                    (cy - margin) / top, (height - cy - margin) / -bottom)
+        if scale <= 0:
+            return
 
         def point(world):
             x, y, _ = np.asarray(world) @ self.view
             return QPointF(cx + x * scale, cy - y * scale)
 
-        x_min, x_max = GRID_X
-        y_min, y_max = GRID_Y
+        # Project the viewport corners onto the ground, then draw whole grid cells
+        # past the edges. Qt clips the lines to the preview.
+        corners = np.array([(x - cx, cy - y) for x in (0, width) for y in (0, height)])
+        floor = (corners / scale) @ self.view_to_floor
+        x_min, y_min = np.floor(floor.min(axis=0) / GRID_STEP).astype(int) * GRID_STEP
+        x_max, y_max = np.ceil(floor.max(axis=0) / GRID_STEP).astype(int) * GRID_STEP
         painter.setPen(QPen(QColor('#23313f'), 1))
         for y in range(y_min, y_max + 1, GRID_STEP):
             painter.drawLine(point((x_min, y, 0)), point((x_max, y, 0)))
