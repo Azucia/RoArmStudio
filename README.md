@@ -1,4 +1,4 @@
-# RoarmStudio 1.0
+# RoarmStudio 1.1
 
 RoarmStudio 是为 RoArm-M3-Pro 开发的 Windows 桌面工作台。**V1.0有关XYZ的逆运动学全部在软件端计算。** 用户给出目标XYZ，软件端将**需要到达的坐标**换算成机械臂的六个关节角，通过 USB 串口直接发一条 JSON 指令（`T=102`）。机械臂通过 `T=105` 回报关节角和模型坐标。这条控制路径无需刷写固件。
 
@@ -31,7 +31,7 @@ RoarmStudio 是为 RoArm-M3-Pro 开发的 Windows 桌面工作台。**V1.0有关
 
 ## 使用
 
-Windows x64 用户可以从 [1.0 发布页](https://github.com/Azucia/RoArmStudio/releases/tag/v1.0) 下载安装包或免安装版。电脑端源码启动方式：
+Windows x64 用户可以从 [v1.1 发布页](https://github.com/Azucia/RoArmStudio/releases/tag/v1.1) 下载安装包或免安装版。电脑端源码启动方式：
 
 ```powershell
 py -m venv .venv
@@ -46,9 +46,9 @@ py -m venv .venv
 - **相机与采集**：AR0234 彩色预览、Gemini 2 彩色/深度/对齐叠加、快照与记录；支持按设备身份恢复连接。
 - **界面与诊断**：三种外观；串口命令和关节反馈日志可用于复盘一次动作。
 
-## 下一步（V1.01)：给其他软件使用的 SDK
+## 后续计划：给其他软件使用的 SDK
 
-计划把电脑端已验证的控制逻辑开放为 SDK。第一阶段拟提供连接与状态读取、绝对 XYZ 和相对点动、动作取消与错误反馈。外部视觉、自动化和采集软件可以复用同一套目标保持与带载补偿，不必各写一遍逆解。SDK 属于后续计划，1.0 提供桌面程序和源码。
+计划把电脑端已验证的控制逻辑开放为 SDK。第一阶段拟提供连接与状态读取、绝对 XYZ 和相对点动、动作取消与错误反馈。外部视觉、自动化和采集软件可以复用同一套目标保持与带载补偿，不必各写一遍逆解。
 
 安全示教协议、可选固件源码和独立角度监视页分别见 [firmware](firmware) 与 [tools](tools)。完整目录、依赖及打包方法见[构建说明](docs/build.md)。USB 更新客户端可用 `python tools/test_update_firmware.py` 离线测试。
 

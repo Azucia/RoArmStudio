@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QPush
     QHBoxLayout, QVBoxLayout, QGridLayout, QComboBox, QSpinBox, QDoubleSpinBox,
     QGroupBox, QPlainTextEdit, QScrollArea, QFileDialog, QMessageBox, QSlider, QTabWidget, QFrame, QCheckBox, QMenu, QScroller, QSizePolicy)
 from serial.tools import list_ports
-from backend import Shared, Arm, UVC, Gemini, Recorder, KEYS, NAMES, LIMITS, joint_command, hold_command, depth_views
+from backend import Shared, Arm, UVC, Gemini, Recorder, KEYS, NAMES, LIMITS, joint_command, depth_views
 from backend import all_command, TorqueChange
 from version import VERSION
 from controls import Controls
@@ -199,7 +199,8 @@ class Window(QMainWindow):
         l.addLayout(row)
         l.addStretch()
         row = QHBoxLayout()
-        self.hold_btn = self.button(row, '停止运动 / 回放', self.hold)
+        self.hold_btn = self.button(row, '取消后续动作 / 回放', self.hold)
+        self.hold_btn.setToolTip('取消待发动作；已发送的目标可能继续执行，不改写保持目标、不释放扭矩。')
         self.hold_btn.setObjectName('stop')
         self.teach_btn = self.button(row, '释放扭矩 · 手动示教', self.teach)
         l.addLayout(row)
@@ -505,19 +506,12 @@ class Window(QMainWindow):
         self.note('已将实际角度复制到目标框；未发送运动指令。')
 
     def hold(self):
-        try:
-            computer_busy = bool(self.arm and getattr(self.arm,'host_busy',False))
-            if self.arm:
-                self.arm.cancel_replay()
-            if computer_busy:
-                self.cartesian_pad.target_intent.clear()
-                self.note('已取消电脑定位后续指令；最后一个受限关节目标仍保持。此操作不释放扭矩。')
-                return
-            if not self.fresh():
-                raise ValueError('反馈不新鲜，无法可靠发送保持当前位置指令。')
-            self.arm.submit(hold_command(self.shared.pose))
-        except Exception as e:
-            self.error(e)
+        # Replacing a loaded holding target with encoder angles can cause sag.
+        # The native joint protocol has no verified instantaneous stop command.
+        if self.arm:
+            self.arm.cancel_replay()
+        self.cartesian_pad.target_intent.clear()
+        self.note('已取消待发动作和回放；已发送的目标可能继续执行。未改写保持目标，未释放扭矩。')
 
     def move_all(self):
         try:

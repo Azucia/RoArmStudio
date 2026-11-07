@@ -30,7 +30,7 @@ class SafeTorqueSerial(FakeSerial):
             for key,i in zip(('torswitchB','torswitchS','torswitchE','torswitchT','torswitchR','torswitchG'),(0,1,3,4,5,6)):
                 pose[key]=self.states[i]
             self.buffer.extend((json.dumps(pose)+'\n').encode())
-            return
+            return len(raw)
         if cmd['T'] != 211:
             return super().write(raw)
         self.writes.append(cmd)
@@ -43,6 +43,7 @@ class SafeTorqueSerial(FakeSerial):
         reply = dict(T=2111, protocol='studio-teach-v1', request=cmd['request'],
                      ok=True, states=self.states.copy())
         self.buffer.extend((json.dumps(reply)+'\n').encode())
+        return len(raw)
 
 
 class TorqueTests(unittest.TestCase):

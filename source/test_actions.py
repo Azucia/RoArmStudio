@@ -21,7 +21,10 @@ class MotionSerial(FakeSerial):
             self.values = [cmd[k] for k in ('base', 'shoulder', 'elbow', 'wrist', 'roll', 'hand')]
         self.writes.append(cmd)
         if cmd['T'] == 105:
-            self.buffer.extend((json.dumps(dict(T=1051, **dict(zip(KEYS, self.values))))+'\n').encode())
+            pose = dict(T=1051, **dict(zip(KEYS, self.values)))
+            pose.update({'torswitch'+k: 1 for k in ('B', 'S', 'E', 'T', 'R', 'G')})
+            self.buffer.extend((json.dumps(pose)+'\n').encode())
+        return len(raw)
 
 
 class ActionTests(unittest.TestCase):
@@ -103,6 +106,9 @@ class ActionTests(unittest.TestCase):
             self.assertFalse(player.is_alive())
             self.assertIsNone(player.error)
             self.assertEqual(player.progress, 1.)
+            self.assertEqual(arm.last_joint_target, target)
+            self.assertTrue(any(row.get('T') == 102 and row['base'] == target[0]
+                                for row in FakeSerial.instances[-1].writes))
             token = arm.begin_replay()
             arm.cancel_replay()
             with self.assertRaises(ValueError):

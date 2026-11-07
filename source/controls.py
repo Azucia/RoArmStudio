@@ -31,7 +31,9 @@ class Controls(QDialog):
         self.device_page=QWidget()
         self.make_device_simple()
         row = QHBoxLayout()
-        owner.button(row, '停止回放 / 保持当前位置', self.stop_playback).setObjectName('stop')
+        stop = owner.button(row, '取消后续动作 / 回放', self.stop_playback)
+        stop.setObjectName('stop')
+        stop.setToolTip('取消待发动作；已发送的目标可能继续执行，不改写保持目标、不释放扭矩。')
         owner.button(row, '关闭面板', self.close)
         outer.addLayout(row)
         self.timer = QTimer(self)
@@ -104,7 +106,7 @@ class Controls(QDialog):
         text = QLabel('回放从首帧开始，速度受关节速度上限约束。\n请先结束手动示教并托稳机械臂。')
         text.setWordWrap(True)
         layout.addWidget(text)
-        self.button(layout, '停止回放 / 保持当前位置', self.owner.hold).setObjectName('stop')
+        self.button(layout, '取消后续动作 / 回放', self.owner.hold).setObjectName('stop')
         layout.addStretch()
 
     def make_device_simple(self):
@@ -129,7 +131,7 @@ class Controls(QDialog):
         self.device_feedback.setTextInteractionFlags(self.device_feedback.textInteractionFlags())
         layout.addWidget(self.device_feedback)
         layout.addStretch()
-        self.button(layout, '停止运动 / 回放', self.owner.hold).setObjectName('stop')
+        self.button(layout, '取消后续动作 / 回放', self.owner.hold).setObjectName('stop')
 
     def record_teach(self):
         if self.teach_record and self.teach_record.is_alive():
