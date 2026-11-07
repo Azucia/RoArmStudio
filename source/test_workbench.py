@@ -5,6 +5,9 @@ from threading import Event
 from types import SimpleNamespace
 
 import numpy as np
+from PySide6.QtCore import QPoint, QPointF, Qt
+from PySide6.QtGui import QWheelEvent
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from app import Window
@@ -64,6 +67,35 @@ class WorkbenchTests(unittest.TestCase):
         w.tick()
         self.assertTrue(w.views[0].image.pixmap().isNull())
         self.assertNotIn('UVC', w.status_strip.labels[1].text())
+
+    def test_mouse_navigation_changes_only_the_preview(self):
+        w = self.window
+        w.show()
+        APP.processEvents()
+        w.tick()
+        view = w.arm_view
+        start = view.rect().center()
+        delta = QPoint(36, 20)
+        original_view = view.view.copy()
+        original_mesh = view.triangles.copy()
+
+        QTest.mousePress(view, Qt.LeftButton, pos=start)
+        QTest.mouseMove(view, start + delta)
+        QTest.mouseRelease(view, Qt.LeftButton, pos=start + delta)
+        self.assertFalse(np.allclose(view.view, original_view))
+        self.assertTrue(np.array_equal(view.triangles, original_mesh))
+
+        QTest.mousePress(view, Qt.RightButton, pos=start)
+        QTest.mouseMove(view, start + delta)
+        QTest.mouseRelease(view, Qt.RightButton, pos=start + delta)
+        self.assertEqual(view.pan, QPointF(delta))
+
+        wheel = QWheelEvent(QPointF(start), QPointF(view.mapToGlobal(start)), QPoint(),
+                            QPoint(0, 120), Qt.NoButton, Qt.NoModifier, Qt.NoScrollPhase, False)
+        APP.sendEvent(view, wheel)
+        self.assertGreater(view.zoom, 1)
+        self.assertTrue(wheel.isAccepted())
+        self.assertTrue(w.arm.commands.empty())
 
     def test_replay_state_and_stop_use_existing_paths(self):
         w = self.window
