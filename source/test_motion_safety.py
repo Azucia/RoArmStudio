@@ -1,14 +1,17 @@
-"""Regression scenarios for loaded stopping and interrupted playback; no hardware."""
+"""Regression scenarios for motion limits, stopping and playback; no hardware."""
+import json
 import math
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import time
 import threading
 import unittest
 from unittest.mock import patch
 
 from PySide6.QtWidgets import QApplication
-from actions import Playback
+from actions import Playback, load_trajectory
 from app import Window
-from backend import Arm, Shared, KEYS, all_command, joint_command
+from backend import Arm, Shared, KEYS, all_command, joint_command, pose_command
 from test_backend import FakeSerial
 
 APP = QApplication.instance() or QApplication([])
@@ -24,6 +27,53 @@ class MotionSafetyTests(unittest.TestCase):
         arm.connected = True
         arm.last_joint_target = [0, 0, math.pi/2, 0, 0, math.pi]
         return shared, arm
+
+    def test_front_sector_edges_apply_to_angles_and_xyz(self):
+        for sign in (1, -1):
+            with self.subTest(side=sign):
+                _, arm = self.arm()
+                boundary = math.radians(sign * 105)
+                values = [boundary, 0, math.pi/2, 0, 0, math.pi]
+                arm.submit(all_command(values))
+                arm.submit(pose_command([250*math.cos(boundary), 250*math.sin(boundary), 180, 0, 0, 180]))
+                with self.assertRaisesRegex(ValueError, '105'):
+                    joint_command(0, sign * 105.01)
+                outside = math.radians(sign * 105.01)
+                with self.assertRaisesRegex(ValueError, '105'):
+                    pose_command([250*math.cos(outside), 250*math.sin(outside), 180, 0, 0, 180])
+
+    def test_raw_motion_cannot_bypass_sector_or_fold_behind_base(self):
+        _, arm = self.arm()
+        for command in (dict(T=101, joint=1, rad=math.radians(120)),
+                        dict(T=1041, x=-200, y=0),
+                        dict(T=102, base=0, shoulder=-math.pi/2, elbow=0, wrist=0, roll=0, hand=math.pi)):
+            with self.subTest(command=command), self.assertRaisesRegex(ValueError, '105'):
+                arm.submit(command)
+        self.assertTrue(arm.commands.empty())
+
+    def test_boundary_readback_allows_nonbase_motion_and_blocks_outside_before_write(self):
+        shared, arm = self.arm()
+        rounded = round(105 * 4096 / 360) * math.tau / 4096
+        shared.pose['b'] = rounded
+        serial = FakeSerial()
+        arm.submit(joint_command(5, 180))
+        arm._write_pending(serial)
+        self.assertEqual(len(serial.writes), 1)
+        receipt = arm.submit(joint_command(5, 180))
+        shared.pose['b'] = math.radians(106)
+        arm._write_pending(serial)
+        self.assertEqual(len(serial.writes), 1)
+        self.assertIn('105', receipt.error)
+
+    def test_old_trajectory_with_rear_waypoint_is_rejected_on_load(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / 'record.json'
+            path.write_text(json.dumps({'format': 'roarm-studio-native-v1', 'records': [
+                {'time': i, 'radians': [math.radians(angle), 0, math.pi/2, 0, 0, math.pi]}
+                for i, angle in enumerate((0, 120))
+            ]}), encoding='utf-8')
+            with self.assertRaisesRegex(ValueError, '105'):
+                load_trajectory(path)
 
     def test_stop_never_retargets_loaded_encoders_even_without_fresh_feedback(self):
         for age in (0, 5):

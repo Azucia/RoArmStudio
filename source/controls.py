@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (QDialog, QTabWidget, QWidget, QVBoxLayout, QHBoxL
     QLineEdit, QPlainTextEdit, QFileDialog, QMessageBox, QInputDialog, QApplication)
 from backend import KEYS, NAMES, all_command, pose_command
 from actions import TeachRecorder, Playback, load_trajectory
+from host_control import base_in_sector
 
 
 class Controls(QDialog):
@@ -90,8 +91,10 @@ class Controls(QDialog):
         row = QHBoxLayout()
         self.import_format = QComboBox()
         self.import_format.addItems(['Studio 原生角度轨迹', '官方 SDK 轨迹（夹爪已反转）'])
+        self.import_format.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.import_format.setMinimumContentsLength(12)
         self.import_format.setMaximumWidth(230)
-        row.addWidget(self.import_format)
+        row.addWidget(self.import_format, 1)
         self.button(row, '载入轨迹', self.load)
         layout.addLayout(row)
         row = QHBoxLayout()
@@ -116,7 +119,9 @@ class Controls(QDialog):
         self.button(row, '释放 / 恢复扭矩', self.owner.teach)
         self.button(row, '开启保持', self.torque_on)
         layout.addLayout(row)
-        layout.addWidget(QLabel('释放前请托住机械臂；设置发送后请观察实机。'))
+        torque_hint = QLabel('释放前请托住机械臂；设置发送后请观察实机。')
+        torque_hint.setWordWrap(True)
+        layout.addWidget(torque_hint)
         row = QHBoxLayout()
         row.addWidget(QLabel('补光灯'))
         self.led = QSpinBox()
@@ -163,7 +168,8 @@ class Controls(QDialog):
         if self.teach_record and self.teach_record.is_alive():
             self.owner.error('请先停止轨迹录制')
             return
-        if not self.owner.fresh() or self.owner.arm.teaching or self.owner.arm.playing:
+        if (not self.owner.fresh() or not base_in_sector(self.owner.shared.pose.get('b'), feedback=True)
+                or self.owner.arm.teaching or self.owner.arm.playing):
             self.owner.error('需要新鲜反馈、保持扭矩，并且没有其他回放')
             return
         if QMessageBox.question(self.owner, '开始回放', '机械臂将先移动到轨迹首帧，然后执行整段动作。确认工作空间已清空？') != QMessageBox.Yes:
@@ -190,11 +196,12 @@ class Controls(QDialog):
         arm = self.owner.arm
         playing = bool(arm and arm.playing)
         teaching = bool(arm and arm.teaching)
+        pose = self.owner.shared.pose
+        inside = fresh and base_in_sector(pose.get('b'), feedback=True)
         self.state.setText(('反馈正常' if fresh else '反馈过期 / 未连接')+
                            (' · 正在回放' if playing else ' · 手动示教' if teaching else ''))
         for button in self.motion_widgets:
-            button.setEnabled(fresh and not playing and not teaching)
-        pose = self.owner.shared.pose
+            button.setEnabled(inside and not playing and not teaching)
         if fresh:
             lines = ['反馈正常'+(' · 手动示教' if teaching else ' · 回放中' if playing else '')]
             for name, key in zip(NAMES, KEYS):

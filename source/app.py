@@ -7,19 +7,22 @@ from datetime import datetime
 from pathlib import Path
 
 import cv2
-from PySide6.QtCore import Qt, QTimer, QSettings, QPoint
-from PySide6.QtGui import QIcon, QFont, QImage, QPixmap
+from PySide6.QtCore import Qt, QTimer, QSettings
+from PySide6.QtGui import QIcon, QImage, QPixmap
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QPushButton,
     QHBoxLayout, QVBoxLayout, QGridLayout, QComboBox, QSpinBox, QDoubleSpinBox,
-    QGroupBox, QPlainTextEdit, QScrollArea, QFileDialog, QMessageBox, QSlider, QTabWidget, QFrame, QCheckBox, QMenu, QScroller, QSizePolicy)
+    QGroupBox, QScrollArea, QFileDialog, QMessageBox, QSlider, QTabBar, QStackedWidget, QFrame, QCheckBox, QScroller, QSizePolicy)
 from serial.tools import list_ports
 from backend import Shared, Arm, UVC, Gemini, Recorder, KEYS, NAMES, LIMITS, joint_command, depth_views
-from backend import all_command, TorqueChange
+from backend import all_command, TorqueChange, BASE_FEEDBACK_ERROR
+from host_control import base_in_sector
 from version import VERSION
 from controls import Controls
 from jogpad import CartesianPad
-from appearance import theme_style, STYLE, GlassCanvas, CameraScreen, enable_native_backdrop, soft_shadow
+from appearance import STYLE, CameraScreen, TitleBar
+from arm_view import ArmView
+from workbench import Diagnostics, StatusStrip, panel
 
 BASE = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).resolve().parent.parent
 
@@ -49,23 +52,26 @@ class Foldout(QWidget):
 class View(QFrame):
     def __init__(self, title, tag):
         super().__init__()
-        self.setObjectName('cameraCard')
-        # Avoid invalidating a large drop-shadow cache on every video frame.
+        self.setObjectName('pane')
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 14, 14, 12)
-        layout.setSpacing(10)
-        header = QHBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        bar = QWidget()
+        bar.setObjectName('paneHeader')
+        header = QHBoxLayout(bar)
+        header.setContentsMargins(8, 4, 8, 4)
         name = QLabel(title)
-        name.setObjectName('cameraTitle')
+        name.setObjectName('paneTitle')
         header.addWidget(name)
         header.addStretch()
         kind = QLabel(tag)
-        kind.setObjectName('cameraTag')
+        kind.setObjectName('quiet')
         header.addWidget(kind)
-        layout.addLayout(header)
+        layout.addWidget(bar)
         self.image = CameraScreen()
         self.meta = QLabel('等待连接')
-        self.meta.setObjectName('cameraMeta')
+        self.meta.setObjectName('quiet')
+        self.meta.setContentsMargins(8, 3, 8, 3)
         self.meta_time = 0
         layout.addWidget(self.image, 1)
         layout.addWidget(self.meta)
@@ -87,47 +93,38 @@ class View(QFrame):
 
 class Window(QMainWindow):
     def __init__(self):
-        super().__init__()
-        self.setWindowTitle('RoarmStudio')
+        super().__init__(None, Qt.Window | Qt.CustomizeWindowHint)
+        self.setWindowTitle('RoArmStudio')
         self.prefs = QSettings('RoArmStudio','PC-control')
         self.auto_paused = False
         self.pending_device = None
         self.camera_pause=set()
         self.camera_next={} 
-        self.resize(1440, 940)
-        if sys.platform == 'win32' and sys.getwindowsversion().build >= 22000:
-            self.setAttribute(Qt.WA_TranslucentBackground)
+        self.resize(1366, 780)
+        self.setStyleSheet(STYLE)
         self.shared = Shared()
         self.arm = self.uvc = self.gemini = self.recorder = None
         self.workers = []
-        self.last_frames = {}
         self.controls = None
         self.folder = BASE/'captures'
-        root = GlassCanvas()
+        root = QWidget()
+        root.setObjectName('workbench')
         self.setCentralWidget(root)
         outer = QVBoxLayout(root)
-        outer.setContentsMargins(20, 12, 20, 18)
-        outer.setSpacing(16)
-        top = QHBoxLayout()
-        title = QLabel('RoarmStudio')
-        title.setObjectName('appTitle')
-        top.addWidget(title)
-        top.addStretch()
-        self.status = QLabel('机械臂未连接')
-        self.status.setObjectName('connectionStatus')
-        top.addWidget(self.status)
-        outer.addLayout(top)
-        body = QHBoxLayout()
-        body.setSpacing(16)
-        outer.addLayout(body, 1)
-        sidebar = QWidget()
-        sidebar.setObjectName('sidebar')
-        # A shadow effect on the control panel invalidates large raster caches.
-        left = QVBoxLayout(sidebar)
-        left.setContentsMargins(14, 14, 14, 14)
-        left.setSpacing(12)
-        sidebar.setFixedWidth(460)
-        body.addWidget(sidebar)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        self.control_tabs = QTabBar()
+        self.control_tabs.setExpanding(False)
+        self.control_tabs.setDrawBase(False)
+        for name in ('视觉工作台', '关节控制', '示教', '控制/连接'):
+            self.control_tabs.addTab(name)
+        outer.addWidget(TitleBar(self, self.control_tabs, VERSION))
+        self.status_strip = StatusStrip(self.hold)
+        outer.addWidget(self.status_strip)
+        self.control_pages = QStackedWidget()
+        self.control_pages.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Ignored)
+        self.control_pages.setMinimumHeight(150)
+        self.control_tabs.currentChanged.connect(self.control_pages.setCurrentIndex)
         self.settings_sections = []
         box = QGroupBox('机械臂连接')
         l = QVBoxLayout(box)
@@ -140,8 +137,9 @@ class Window(QMainWindow):
         l.addLayout(row)
         self.arm_btn = self.button(l, '连接 M3-Pro · USB', self.toggle_arm)
         self.arm_state = QLabel('115200 baud · 等待设备')
+        self.arm_state.setWordWrap(True)
         l.addWidget(self.arm_state)
-        self.auto_connect = QCheckBox('自动连接到上次的设备（机械臂和相机）')
+        self.auto_connect = QCheckBox('自动连接上次的机械臂和相机')
         self.auto_connect.setChecked(self.prefs.value('autoConnect',False,type=bool))
         self.auto_connect.toggled.connect(self.auto_changed)
         l.addWidget(self.auto_connect)
@@ -151,81 +149,78 @@ class Window(QMainWindow):
         l = QVBoxLayout(box)
         l.addWidget(QLabel('原生角度 · 夹爪角度减小时张开'))
         grid = QGridLayout()
+        grid.setColumnStretch(2, 1)
+        for column, label in enumerate(('关节', '实际', '目标')):
+            heading = QLabel(label)
+            heading.setObjectName('quiet')
+            grid.addWidget(heading, 0, column)
         self.targets, self.actual, self.motion = [], [], []
         for i, name in enumerate(NAMES):
-            cell = QWidget()
-            cell_layout = QVBoxLayout(cell)
-            cell_layout.setContentsMargins(0, 0, 0, 0)
-            heading = QHBoxLayout()
-            heading.addWidget(QLabel(name))
+            row = i + 1
+            grid.addWidget(QLabel(name), row, 0)
             actual = QLabel('—')
-            heading.addWidget(actual)
-            cell_layout.addLayout(heading)
+            grid.addWidget(actual, row, 1)
             self.actual.append(actual)
             spin = QDoubleSpinBox()
             spin.setRange(*LIMITS[i])
             spin.setDecimals(1)
             spin.setSuffix('°')
             spin.setSingleStep(1)
-            controls = QHBoxLayout()
-            controls.addWidget(spin)
+            grid.addWidget(spin, row, 2)
             self.targets.append(spin)
             btn = QPushButton('移动')
+            btn.setFixedWidth(50)
             btn.clicked.connect(lambda checked=False, index=i: self.move(index))
-            controls.addWidget(btn)
-            cell_layout.addLayout(controls)
-            grid.addWidget(cell, i//2, i%2)
+            grid.addWidget(btn, row, 3)
             self.motion.append(btn)
         l.addLayout(grid)
         row = QHBoxLayout()
         self.copy_btn = self.button(row, '读取实际角度', self.copy_pose)
         self.motion.append(self.button(row, '全关节到目标', self.move_all))
-        self.button(row, '回初始位', self.home)
         l.addLayout(row)
         self.motion.append(self.copy_btn)
         row = QHBoxLayout()
         row.addWidget(QLabel('速度'))
         self.speed = QSpinBox()
+        self.speed.setMinimumWidth(62)
         self.speed.setRange(20, 600)
         self.speed.setValue(150)
         self.speed.setToolTip('关节控制与回放：舵机步/秒；XYZ 指令速度由固件处理')
         row.addWidget(self.speed)
         row.addWidget(QLabel('加速度'))
         self.acc = QSpinBox()
+        self.acc.setMinimumWidth(62)
         self.acc.setRange(1, 254)
         self.acc.setValue(5)
         self.acc.setToolTip('单位：100 步/秒²；只用于关节控制与回放')
         row.addWidget(self.acc)
         l.addLayout(row)
+        self.motion.append(self.button(l, '回初始位', self.home))
         l.addStretch()
-        row = QHBoxLayout()
-        self.hold_btn = self.button(row, '取消后续动作 / 回放', self.hold)
+        self.hold_btn = self.button(l, '取消后续动作 / 回放', self.hold)
         self.hold_btn.setToolTip('取消待发动作；已发送的目标可能继续执行，不改写保持目标、不释放扭矩。')
         self.hold_btn.setObjectName('stop')
-        self.teach_btn = self.button(row, '释放扭矩 · 手动示教', self.teach)
-        l.addLayout(row)
+        self.teach_btn = self.button(l, '释放扭矩 · 手动示教', self.teach)
         box = QGroupBox('相机连接')
         l = QVBoxLayout(box)
-        row = QHBoxLayout()
-        row.addWidget(QLabel('AR0234 / UVC 索引'))
+        l.addWidget(QLabel('AR0234 / UVC 索引'))
         self.cam_index = QSpinBox()
         self.cam_index.setRange(-1, 15)
         self.cam_index.setSpecialValueText('自动选择 DECXIN / AR0234')
         self.cam_index.setValue(self.prefs.value("cameraIndex",-1,type=int))
-        row.addWidget(self.cam_index)
-        l.addLayout(row)
-        fps_row = QHBoxLayout()
-        fps_row.addWidget(QLabel('相机目标帧率'))
+        l.addWidget(self.cam_index)
+        l.addWidget(QLabel('相机目标帧率'))
         self.camera_fps = QComboBox()
         self.camera_fps.addItem('60 fps · 流畅（Gemini BS 模式）', 60)
         self.camera_fps.addItem('30 fps · 深度 Dense 模式', 30)
         self.camera_fps.setToolTip('在打开相机前选择；60 帧深度使用 BS 模式，精细度降低。')
         self.camera_fps.setCurrentIndex(max(0,self.camera_fps.findData(self.prefs.value("cameraFps",60,type=int))))
-        fps_row.addWidget(self.camera_fps)
-        l.addLayout(fps_row)
+        l.addWidget(self.camera_fps)
         self.uvc_btn = self.button(l, '打开 AR0234', self.toggle_uvc)
         self.gem_btn = self.button(l, '打开 Gemini 2 · RGB-D', self.toggle_gemini)
-        l.addWidget(QLabel('默认按设备名称选择 AR0234；手动索引使用 DirectShow。'))
+        camera_hint = QLabel('默认按设备名称选择 AR0234；手动索引使用 DirectShow。')
+        camera_hint.setWordWrap(True)
+        l.addWidget(camera_hint)
         section = Foldout(box)
         self.settings_sections.append(section)
         box = QGroupBox('采集与保存')
@@ -240,85 +235,61 @@ class Window(QMainWindow):
         self.button(row, '保存快照', self.snapshot)
         self.record_btn = self.button(row, '开始采集', self.record)
         l.addLayout(row)
-        l.addWidget(QLabel('图像＋原始深度＋关节反馈，按主机时间记录。'))
+        record_hint = QLabel('图像＋原始深度＋关节反馈，按主机时间记录。')
+        record_hint.setWordWrap(True)
+        l.addWidget(record_hint)
         section = Foldout(box)
         self.settings_sections.append(section)
-        right = QVBoxLayout()
-        body.addLayout(right, 1)
-        grid = QGridLayout()
-        grid.setSpacing(14)
-        self.views = [View('手上视角', 'AR0234'), View('彩色画面', 'Gemini 2 · RGB'),
-                      View('深度画面', 'Gemini 2 · Depth'), View('彩色与深度', 'RGB-D')]
-        for i, view in enumerate(self.views):
-            grid.addWidget(view, i//2, i%2)
-        right.addLayout(grid, 1)
         self.cartesian_pad = CartesianPad(self)
-        self.control_tabs = QTabWidget()
-        self.control_tabs.addTab(self.scroll_page(self.cartesian_pad),'XYZ')
-        self.control_tabs.addTab(self.scroll_page(self.joint_panel),'关节角度')
-        left.addWidget(self.control_tabs,1)
+        self.diagnostics = Diagnostics()
+        self.log = self.diagnostics.log
+        self.arm_view = ArmView(BASE/'assets'/'roarm_m3')
+        self.views = [View('手部相机', 'CAM1'), View('彩色深度融合', 'CAM2')]
+        outer.addWidget(self.build_workbench(), 1)
+        self.add_control_page('关节控制', self.joint_panel)
 
-        self.theme_button=QPushButton('◐')
-        self.theme_button.setObjectName('themeIcon')
-        self.theme_button.setFixedSize(30,30)
-        self.theme_button.setAccessibleName('切换主题')
-        self.theme_menu=QMenu(self.theme_button)
-        self.theme_actions={}
-        for key,label in [('dark','深色'),('light','浅色'),('color','彩色')]:
-            action=self.theme_menu.addAction(label)
-            action.setCheckable(True)
-            action.triggered.connect(lambda _,k=key:self.set_theme(k))
-            self.theme_actions[key]=action
-        self.theme_button.clicked.connect(lambda:self.theme_menu.popup(
-            self.theme_button.mapToGlobal(self.theme_button.rect().topLeft())-
-            QPoint(0,self.theme_menu.sizeHint().height())))
-        left.addWidget(self.theme_button,0,Qt.AlignLeft)
-        self.set_theme(self.prefs.value('theme','light'))
-
-        row = QHBoxLayout()
-        row.addWidget(QLabel('深度显示上限'))
+        box = QGroupBox('融合显示')
+        row = QGridLayout(box)
+        row.addWidget(QLabel('深度显示上限'), 0, 0)
         self.far = QSpinBox()
         self.far.setRange(300, 10000)
         self.far.setValue(2000)
         self.far.setSuffix(' mm')
-        row.addWidget(self.far)
-        row.addWidget(QLabel('叠加比例'))
+        row.addWidget(self.far, 0, 1)
+        row.addWidget(QLabel('叠加比例'), 1, 0)
         self.alpha = QSlider(Qt.Horizontal)
         self.alpha.setRange(0, 100)
         self.alpha.setValue(45)
-        row.addWidget(self.alpha)
-        right.addLayout(row)
-        self.log = QPlainTextEdit()
-        self.log.setReadOnly(True)
-        self.log.setMaximumBlockCount(250)
-        self.log.setMaximumHeight(66)
-        right.addWidget(self.log)
+        row.addWidget(self.alpha, 1, 1)
+        self.settings_sections.append(Foldout(box))
         credit = QLabel('By Azucia')
         credit.setObjectName('quiet')
         credit.setAccessibleName(f'RoarmStudio {VERSION} · By Azucia')
         credit.setToolTip(f'RoarmStudio {VERSION}')
-        right.addWidget(credit, 0, Qt.AlignRight)
+        footer = QWidget()
+        footer.setObjectName('footer')
+        row = QHBoxLayout(footer)
+        row.setContentsMargins(8, 2, 8, 2)
+        row.addWidget(self.cartesian_pad.state, 1)
+        row.addWidget(credit)
+        outer.addWidget(footer)
         self.controls = Controls(self)
         playback=self.controls.tabs.widget(0)
         self.controls.tabs.removeTab(0)
-        self.control_tabs.addTab(self.scroll_page(playback),'示教回放')
+        self.add_control_page('示教与回放', playback)
         device=self.controls.device_page
         device_box=QGroupBox('设备')
         QVBoxLayout(device_box).addWidget(device)
         link_page=QWidget()
         link_layout=QVBoxLayout(link_page)
         link_layout.addWidget(self.cartesian_pad.computer_mode)
-        details=QWidget()
-        detail_layout=QVBoxLayout(details)
-        detail_layout.setContentsMargins(0,0,0,0)
-        detail_layout.addWidget(self.cartesian_pad.control_settings)
-        detail_layout.addWidget(self.connection_box)
-        detail_layout.addWidget(Foldout(device_box))
+        link_layout.addWidget(self.cartesian_pad.control_settings)
+        link_layout.addWidget(self.connection_box)
+        link_layout.addWidget(Foldout(device_box))
         for section in self.settings_sections:
-            detail_layout.addWidget(section)
-        detail_layout.addStretch()
-        link_layout.addWidget(self.scroll_page(details),1)
-        self.control_tabs.addTab(link_page,'控制/连接')
+            link_layout.addWidget(section)
+        link_layout.addStretch()
+        self.add_control_page('控制/连接', link_page)
         self.refresh_ports()
         self.auto_timer=QTimer(self)
         self.auto_timer.timeout.connect(self.try_previous)
@@ -334,14 +305,50 @@ class Window(QMainWindow):
         self.video_timer.timeout.connect(self.render_frames)
         self.video_timer.start(16)
         self.note('工作台已打开')
-        QTimer.singleShot(100, self.apply_backdrop)
 
-    def apply_backdrop(self):
-        self.centralWidget().native_backdrop = enable_native_backdrop(self)
-        self.centralWidget().update()
+    def build_workbench(self):
+        page = QWidget()
+        page.setObjectName('workbench')
+        body = QHBoxLayout(page)
+        body.setContentsMargins(7, 7, 7, 7)
+        body.setSpacing(6)
+        left = QVBoxLayout()
+        left.setSpacing(6)
+        jog, jog_layout = panel('手动点动', 'BASE · mm', self.cartesian_pad.more)
+        jog_layout.addWidget(self.cartesian_pad.position)
+        jog_layout.addWidget(self.scroll_page(self.cartesian_pad), 1)
+        jog_layout.addWidget(self.cartesian_pad.jog_status)
+        self.control_pages.addWidget(jog)
+        left.addWidget(self.control_pages, 5)
+        left.addWidget(self.diagnostics, 4)
+        sidebar = QWidget()
+        sidebar.setMinimumWidth(312)
+        sidebar.setMaximumWidth(425)
+        sidebar.setLayout(left)
+        body.addWidget(sidebar, 3)
+        right = QVBoxLayout()
+        right.setSpacing(6)
+        pose, pose_layout = panel('机械臂状态')
+        pose_layout.addWidget(self.arm_view, 1)
+        self.tcp = QLabel('TCP · 等待反馈')
+        self.tcp.setObjectName('quiet')
+        self.tcp.setContentsMargins(8, 3, 8, 3)
+        pose_layout.addWidget(self.tcp)
+        right.addWidget(pose, 4)
+        cameras = QHBoxLayout()
+        cameras.setSpacing(6)
+        for view in self.views:
+            cameras.addWidget(view, 1)
+        right.addLayout(cameras, 2)
+        body.addLayout(right, 7)
+        return page
 
-    def showEvent(self, event):
-        super().showEvent(event)
+    def add_control_page(self, title, content):
+        frame, layout = panel(title)
+        scroll = self.scroll_page(content)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        layout.addWidget(scroll, 1)
+        self.control_pages.addWidget(frame)
 
     def button(self, layout, text, fn):
         btn = QPushButton(text)
@@ -364,18 +371,6 @@ class Window(QMainWindow):
         scroll.setWidget(content)
         QScroller.grabGesture(scroll.viewport(),QScroller.TouchGesture)
         return scroll
-
-    def set_theme(self,key):
-        if key not in ('dark','light','color'):
-            key='light'
-        for name,action in self.theme_actions.items():
-            action.setChecked(name==key)
-        self.theme_button.setToolTip('切换主题 · '+self.theme_actions[key].text())
-        self.prefs.setValue('theme',key)
-        self.setProperty('uiTheme',key)
-        self.centralWidget().theme=key
-        self.setStyleSheet(theme_style(key))
-        self.centralWidget().update()
 
     def refresh_ports(self):
         selected=self.ports.currentData()
@@ -455,6 +450,10 @@ class Window(QMainWindow):
         worker=(UVC(self.shared,self.cam_index.value(),fps,identity) if kind=='uvc'
                 else Gemini(self.shared,fps,identity))
         self.camera_next[kind]=time.monotonic()+30
+        with self.shared.lock:
+            self.shared.frames.pop(kind, None)
+        self.rendered_frames.pop(kind, None)
+        self.preview_times.pop(kind, None)
         setattr(self,kind,self.start_worker(worker))
 
     def toggle_camera(self,kind):
@@ -526,9 +525,15 @@ class Window(QMainWindow):
         if not self.fresh() or self.arm.teaching or self.arm.playing:
             self.error('回中需要正常反馈，并先结束示教或回放。')
             return
+        if not base_in_sector(self.shared.pose.get('b'), feedback=True):
+            self.error(BASE_FEEDBACK_ERROR)
+            return
         if QMessageBox.question(self, '回中 · 官方初始姿态',
             '会移动所有关节到初始姿态（不是将 XYZ 清零，也不改写中位）。确认周围没有障碍？') == QMessageBox.Yes:
-            self.arm.submit(all_command([0, 0, math.pi/2, 0, 0, math.pi], 100, 5))
+            try:
+                self.arm.submit(all_command([0, 0, math.pi/2, 0, 0, math.pi], 100, 5))
+            except ValueError as e:
+                self.error(e)
 
     def open_controls(self):
         self.control_tabs.setCurrentIndex(2)
@@ -602,21 +607,39 @@ class Window(QMainWindow):
         playing = bool(self.arm and self.arm.playing)
         torque_busy = bool(self.arm and (self.arm.torque_pending or self.arm.torque_fault))
         self.cartesian_pad.refresh()
+        inside = fresh and base_in_sector(self.shared.pose.get('b'), feedback=True)
         for btn in self.motion:
-            btn.setEnabled(fresh and not teaching and not playing and not torque_busy)
+            btn.setEnabled(inside and not teaching and not playing and not torque_busy)
         self.hold_btn.setEnabled(fresh and not teaching and not torque_busy)
         self.teach_btn.setEnabled(fresh and not playing and not (self.arm and self.arm.torque_pending))
         self.teach_btn.setText('恢复扭矩 · 锁定当前位置' if teaching or (fresh and all(self.shared.pose.get('torswitch'+k)==0 for k in ('B','S','E','T','R','G'))) else '释放扭矩 · 手动示教')
         self.arm_state.setText('反馈正常 · 手动示教' if fresh and teaching else '反馈正常 · USB 串口' if fresh else '等待反馈 / 离线')
         if fresh and (teaching or torque_busy or self.arm.torque_state != '未确认'):
             self.arm_state.setText(self.arm.torque_state)
-        if self.arm and self.arm.connected:
-            age=time.monotonic()-self.shared.pose_time if self.shared.pose_time else None
-            self.status.setText('●  机械臂已连接' if age is not None and age<2 else '●  串口已打开 · 等待反馈')
-            if not fresh:
-                self.arm_state.setText('等待下一帧反馈' if age is None else f'上次反馈 {age:.1f} 秒前')
+        connected = bool(self.arm and self.arm.connected)
+        now = time.monotonic()
+        age = now-self.shared.pose_time if connected and self.shared.pose_time else None
+        if connected and not fresh:
+            self.arm_state.setText('等待下一帧反馈' if age is None else f'上次反馈 {age:.1f} 秒前')
+        pose = self.shared.pose if fresh else None
+        if connected and self.arm.torque_pending:
+            torque = '扭矩切换中'
+        elif connected and self.arm.torque_fault:
+            torque = '扭矩未确认'
         else:
-            self.status.setText('○  机械臂未连接')
+            torque = self.torque_label(pose)
+        cameras = tuple(self.camera_online(name, now) for name in ('uvc', 'gemini'))
+        self.status_strip.refresh(self.arm.port if connected else '—', connected, age, cameras, torque)
+        targets = tuple(self.arm.last_joint_target or ()) if fresh else ()
+        self.diagnostics.set_angles(pose, targets)
+        angles = tuple(pose[key] for key in KEYS) if pose else None
+        self.arm_view.set_pose(angles, connected)
+        coords = tuple(pose.get(key) for key in ('x', 'y', 'z')) if pose else ()
+        valid_tcp = coords and all(isinstance(x, (float, int)) and math.isfinite(x) for x in coords)
+        self.tcp.setText('TCP · ' + ' / '.join(f'{x:.1f}' for x in coords) + ' mm' if valid_tcp
+                         else 'TCP · 等待反馈')
+        replay = self.controls.playback
+        self.cartesian_pad.set_execution_mode(bool(replay and replay.arm is self.arm and replay.degraded))
         if self.shared.pose:
             for label, key in zip(self.actual, KEYS):
                 label.setText(f'{math.degrees(self.shared.pose[key]):.1f}°'+('' if fresh else ' 旧'))
@@ -626,16 +649,38 @@ class Window(QMainWindow):
         self.record_btn.setText(f'停止采集 · {self.recorder.count}' if self.recorder and self.recorder.is_alive() else '开始采集')
         self.camera_fps.setEnabled(not any(w and w.is_alive() for w in (self.uvc, self.gemini)))
 
+    @staticmethod
+    def torque_label(pose):
+        if not pose:
+            return '扭矩未知'
+        states = [pose.get('torswitch'+key) for key in ('B', 'S', 'E', 'T', 'R', 'G')]
+        if all(value == 1 for value in states):
+            return '已使能'
+        if all(value == 0 for value in states):
+            return '已释放'
+        return '部分使能' if set(states) == {0, 1} else '扭矩未知'
+
+    def camera_online(self, name, now):
+        worker = getattr(self, name)
+        packet = self.shared.frames.get(name)
+        return bool(worker and worker.is_alive() and not worker.stop.is_set()
+                    and packet and now-packet['monotonic'] < 1)
+
     def render_frames(self):
         with self.shared.lock:
             packets = dict(self.shared.frames)
-        for source, packet in packets.items():
+        for source, view in zip(('uvc', 'gemini'), self.views):
+            worker = getattr(self, source)
+            packet = packets.get(source)
+            if not (worker and worker.is_alive() and not worker.stop.is_set() and packet):
+                if view.meta.text() != '等待连接':
+                    view.image.clear()
+                    view.meta.setText('等待连接')
+                continue
             if self.rendered_frames.get(source) == packet['host_ns']:
                 age = time.monotonic()-packet['monotonic']
                 if age > 1:
-                    for index in ((0,) if source == 'uvc' else (1, 2, 3)):
-                        label = self.views[index].meta
-                        label.setText(label.text().split(' · ')[0]+f' · 最后帧 {age:.1f}s 前')
+                    view.meta.setText(f'最后帧 {age:.1f}s 前')
                 continue
             self.rendered_frames[source] = packet['host_ns']
             now = time.perf_counter()
@@ -649,14 +694,11 @@ class Window(QMainWindow):
                       f' · 采集 {packet.get("fps", 0):.1f} / 预览 {display_fps:.1f} fps')
             if source == 'uvc':
                 im = images['rgb']
-                self.views[0].show_image(im, f'{im.shape[1]} × {im.shape[0]}'+suffix)
+                view.show_image(im, f'{im.shape[1]} × {im.shape[0]}'+suffix)
             else:
                 rgb, mm = images['rgb'], images['depth_mm']
-                depth, overlay = depth_views(rgb, mm, self.far.value(), self.alpha.value()/100)
-                self.views[1].show_image(rgb, f'{rgb.shape[1]} × {rgb.shape[0]}'+suffix)
-                center = mm[mm.shape[0]//2, mm.shape[1]//2]
-                self.views[2].show_image(depth, (f'中心 {center:.0f} mm' if center else '中心深度无效')+suffix)
-                self.views[3].show_image(overlay, 'D2C 已对齐 · 叠加显示'+suffix)
+                _, overlay = depth_views(rgb, mm, self.far.value(), self.alpha.value()/100)
+                view.show_image(overlay, 'D2C 已对齐'+suffix)
 
     def closeEvent(self, event):
         self.auto_paused=True
@@ -691,7 +733,8 @@ def main():
     app.setWindowIcon(QIcon(str(BASE/'assets'/'arm-drawing-rounded.ico')))
     # A second shortcut launch activates the existing window, rather than
     # silently exiting behind a hidden process or opening devices twice.
-    instance_name = 'RoArmStudioPCPositionTrialWindow'
+    smoke = '--smoke' in sys.argv
+    instance_name = 'RoArmStudioPCPositionTrialWindow' + ('-smoke' if smoke else '')
     activation = QLocalSocket()
     activation.connectToServer(instance_name)
     if activation.waitForConnected(300):
@@ -705,6 +748,10 @@ def main():
     app.setStyle('Fusion')
     app.setStyleSheet(STYLE)
     window = Window()
+    if smoke:
+        window.auto_connect.blockSignals(True)
+        window.auto_connect.setChecked(False)
+        window.auto_connect.blockSignals(False)
     def activate_existing():
         while instance_server.hasPendingConnections():
             connection = instance_server.nextPendingConnection()
@@ -715,8 +762,8 @@ def main():
         window.raise_()
         window.activateWindow()
     instance_server.newConnection.connect(activate_existing)
-    window.show()
-    if '--smoke' in sys.argv:
+    window.showMaximized()
+    if smoke:
         QTimer.singleShot(1600, lambda: window.grab().save(str(BASE/'界面预览.png')))
         if '--angles' in sys.argv:
             QTimer.singleShot(1800, lambda: window.control_tabs.setCurrentIndex(1))
