@@ -11,13 +11,51 @@ from pathlib import Path
 import cv2
 import numpy as np
 import serial
+from host_control import BASE_LIMIT_DEG, base_in_sector, forward, xy_in_sector
 
 KEYS = ('b', 's', 'e', 't', 'r', 'g')
 NAMES = ('底座', '肩部', '肘部', '腕部俯仰', '腕部旋转', '夹爪')
 # Conservative operating envelope, in firmware/native degrees (no SDK gripper inversion).
-LIMITS = ((-180, 180), (-90, 90), (0, 180), (-90, 90), (-180, 180), (math.degrees(1.08), 180))
+LIMITS = ((-BASE_LIMIT_DEG, BASE_LIMIT_DEG), (-90, 90), (0, 180), (-90, 90),
+          (-180, 180), (math.degrees(1.08), 180))
 MOTION_TYPES = (101, 102, 1041)
 FEEDBACK_TIMEOUT = .6
+BASE_TARGET_ERROR = f'底座目标超出正前方 ±{BASE_LIMIT_DEG}°'
+BASE_FEEDBACK_ERROR = f'底座反馈超出正前方 ±{BASE_LIMIT_DEG}°，已禁止运动'
+TCP_TARGET_ERROR = f'末端目标超出正前方 ±{BASE_LIMIT_DEG}°'
+ALL_JOINT_FIELDS = ('base', 'shoulder', 'elbow', 'wrist', 'roll', 'hand')
+
+
+def motion_sector_error(command, pose, last_target):
+    if not pose or not base_in_sector(pose.get('b'), feedback=True):
+        return BASE_FEEDBACK_ERROR if pose else '缺少底座反馈，已禁止运动'
+    mode = command.get('T')
+    if mode == 1041:
+        x, y = command.get('x'), command.get('y')
+        if not all(isinstance(value, (float, int)) and math.isfinite(value) for value in (x, y)):
+            return '末端目标缺少有效的 XY 坐标'
+        return None if xy_in_sector(x, y) else TCP_TARGET_ERROR
+    if mode == 102:
+        candidates = [([command.get(key) for key in ALL_JOINT_FIELDS], False)]
+    else:
+        index = command.get('joint')
+        if type(index) is not int or not 1 <= index <= len(KEYS):
+            return '未知关节'
+        candidates = [([pose.get(key) for key in KEYS], index != 1)]
+        if last_target is not None:
+            candidates.append((list(last_target), False))
+        for candidate, _ in candidates:
+            candidate[index-1] = command.get('rad')
+    for angles, measured_base in candidates:
+        if not base_in_sector(angles[0], feedback=measured_base):
+            return BASE_TARGET_ERROR
+        try:
+            x, y = forward(angles)[:2]
+        except ValueError:
+            return '缺少有效关节目标'
+        if not xy_in_sector(x, y, feedback=measured_base):
+            return TCP_TARGET_ERROR
+    return None
 
 
 def torque_disabled(pose):
@@ -29,6 +67,8 @@ def check_radians(values):
         raise ValueError('需要六个关节弧度')
     for i, value in enumerate(values):
         joint_command(i, math.degrees(value))
+    if not xy_in_sector(*forward(values)[:2]):
+        raise ValueError(TCP_TARGET_ERROR)
     return values
 
 
@@ -53,6 +93,8 @@ def pose_command(values, measured_angles=None):
         if not low <= v <= high and not preserved:
             unit = 'mm' if i < 3 else '°'
             raise ValueError(f'{("X", "Y", "Z", "俯仰", "旋转", "夹爪")[i]}目标 {v:.3f}{unit} 超出软件范围 {low:.3f}～{high:.3f}{unit}')
+    if not xy_in_sector(values[0], values[1]):
+        raise ValueError(TCP_TARGET_ERROR)
     return dict(T=1041, **dict(zip(('x', 'y', 'z', 't', 'r', 'g'), values[:3]+[math.radians(v) for v in values[3:]])))
 
 
@@ -68,13 +110,15 @@ def valid_pose(data):
 
 def joint_command(index, degrees, speed=150):
     lo, hi = LIMITS[index]
-    if not math.isfinite(degrees) or not lo <= degrees <= hi:
+    rad = math.radians(degrees)
+    valid = base_in_sector(rad) if index == 0 else math.isfinite(degrees) and lo <= degrees <= hi
+    if not valid:
         raise ValueError(f'{NAMES[index]}超出软件限位 {lo}～{hi}°')
-    return dict(T=101, joint=index + 1, rad=math.radians(degrees), spd=speed, acc=5)
+    return dict(T=101, joint=index + 1, rad=rad, spd=speed, acc=5)
 
 
 def hold_command(pose):
-    return dict(T=102, **dict(zip(('base', 'shoulder', 'elbow', 'wrist', 'roll', 'hand'),
+    return dict(T=102, **dict(zip(ALL_JOINT_FIELDS,
                                 [pose[k] for k in KEYS])), spd=150, acc=5)
 
 
@@ -204,6 +248,9 @@ class Arm(Worker):
             raise ValueError('请先停止回放')
         # Replace pending motion, but preserve ordered device-setting commands.
         if command.get('T') in MOTION_TYPES:
+            rejected = motion_sector_error(command, self.shared.pose, self.last_joint_target)
+            if rejected:
+                raise ValueError(rejected)
             settings = []
             while True:
                 try:
@@ -255,6 +302,8 @@ class Arm(Worker):
             elif cmd.get('T') in MOTION_TYPES and (self.teaching or self.torque_pending or
                     self.torque_fault or torque_disabled(self.shared.pose)):
                 rejected = '扭矩未确认保持，已丢弃运动指令'
+            elif cmd.get('T') in MOTION_TYPES:
+                rejected = motion_sector_error(cmd, self.shared.pose, self.last_joint_target)
             if rejected:
                 self.shared.event(rejected)
                 if receipt is not None:
@@ -272,7 +321,7 @@ class Arm(Worker):
                     raise
                 self.trace('serial_write', command=public_command(cmd), host_intent=host_intent)
                 if cmd.get('T') == 102:
-                    self.last_joint_target = [cmd[k] for k in ('base', 'shoulder', 'elbow', 'wrist', 'roll', 'hand')]
+                    self.last_joint_target = [cmd[k] for k in ALL_JOINT_FIELDS]
                 elif cmd.get('T') == 101 and self.last_joint_target is not None:
                     self.last_joint_target[int(cmd['joint'])-1] = cmd['rad']
                 elif cmd.get('T') in (1041, 210, 211):
@@ -288,14 +337,16 @@ class Arm(Worker):
     def _accept_pose(self, data):
         with self.command_lock:
             gap = time.monotonic()-self.shared.pose_time > FEEDBACK_TIMEOUT
-            if gap or any(data.get('torswitch'+key) != 1 for key in ('B', 'S', 'E', 'T', 'R', 'G')):
+            outside = not base_in_sector(data.get('b'), feedback=True)
+            if gap or outside or any(data.get('torswitch'+key) != 1 for key in ('B', 'S', 'E', 'T', 'R', 'G')):
                 self.last_joint_target = None
                 self.reference_generation += 1
             # Detect the gap before refreshing the timestamp, including when the
             # serial thread itself was delayed and did not run its write guard.
-            if self.playing and (gap or torque_disabled(data)):
+            if self.playing and (gap or outside or torque_disabled(data)):
                 self.cancel_replay()
-                self.shared.event('反馈中断或关节扭矩关闭，已取消回放；不会自动续播。')
+                self.shared.event(BASE_FEEDBACK_ERROR+'，已取消回放。' if outside else
+                                  '反馈中断或关节扭矩关闭，已取消回放；不会自动续播。')
             with self.shared.lock:
                 self.shared.pose = data
                 self.shared.pose_time = time.monotonic()

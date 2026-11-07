@@ -2,11 +2,22 @@
 import math
 
 KEYS=('b','s','e','t','r','g')
+BASE_LIMIT_DEG = 105
+BASE_LIMIT_RAD = math.radians(BASE_LIMIT_DEG)
 L2=math.hypot(236.82,30.0)
 T2=math.atan2(30.0,236.82)
 L3=144.49
 LE=math.hypot(171.67,13.69)
 TE=math.atan2(13.69,171.67)
+
+def base_in_sector(angle, *, feedback=False):
+    # Firmware rounds base positions to one of 4096 encoder steps per turn.
+    tolerance = math.pi / 4096 if feedback else 0
+    return (isinstance(angle, (float, int)) and math.isfinite(angle)
+            and abs(angle) <= BASE_LIMIT_RAD + tolerance + 1e-12)
+
+def xy_in_sector(x, y, *, feedback=False):
+    return math.hypot(x, y) < 1e-6 or base_in_sector(math.atan2(y, x), feedback=feedback)
 
 def finite(values,size):
     values=list(values)
@@ -22,8 +33,10 @@ def forward(joints):
 
 def check_joints(joints):
     q=finite(joints,6)
-    limits=[(-math.pi,math.pi),(-math.pi/2,math.pi/2),(0,math.pi),(-math.pi/2,math.pi/2)]
-    if any(not lo<=v<=hi for v,(lo,hi) in zip(q[:4],limits)):
+    if not base_in_sector(q[0]):
+        raise ValueError(f'底座目标超出正前方 ±{BASE_LIMIT_DEG}°')
+    limits=[(-math.pi/2,math.pi/2),(0,math.pi),(-math.pi/2,math.pi/2)]
+    if any(not lo<=v<=hi for v,(lo,hi) in zip(q[1:4],limits)):
         raise ValueError('Joint limit; command is not clamped')
     if abs(q[4])>math.pi+.02 or not 1.0<=q[5]<=3.2:
         raise ValueError('Preserved roll/gripper outside operating envelope')

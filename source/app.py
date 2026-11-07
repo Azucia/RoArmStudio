@@ -15,7 +15,8 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QPush
     QGroupBox, QScrollArea, QFileDialog, QMessageBox, QSlider, QTabBar, QStackedWidget, QFrame, QCheckBox, QScroller, QSizePolicy)
 from serial.tools import list_ports
 from backend import Shared, Arm, UVC, Gemini, Recorder, KEYS, NAMES, LIMITS, joint_command, depth_views
-from backend import all_command, TorqueChange
+from backend import all_command, TorqueChange, BASE_FEEDBACK_ERROR
+from host_control import base_in_sector
 from version import VERSION
 from controls import Controls
 from jogpad import CartesianPad
@@ -185,7 +186,7 @@ class Window(QMainWindow):
         row = QHBoxLayout()
         self.copy_btn = self.button(row, '读取实际角度', self.copy_pose)
         self.motion.append(self.button(row, '全关节到目标', self.move_all))
-        self.button(row, '回初始位', self.home)
+        self.motion.append(self.button(row, '回初始位', self.home))
         l.addLayout(row)
         self.motion.append(self.copy_btn)
         row = QHBoxLayout()
@@ -529,9 +530,15 @@ class Window(QMainWindow):
         if not self.fresh() or self.arm.teaching or self.arm.playing:
             self.error('回中需要正常反馈，并先结束示教或回放。')
             return
+        if not base_in_sector(self.shared.pose.get('b'), feedback=True):
+            self.error(BASE_FEEDBACK_ERROR)
+            return
         if QMessageBox.question(self, '回中 · 官方初始姿态',
             '会移动所有关节到初始姿态（不是将 XYZ 清零，也不改写中位）。确认周围没有障碍？') == QMessageBox.Yes:
-            self.arm.submit(all_command([0, 0, math.pi/2, 0, 0, math.pi], 100, 5))
+            try:
+                self.arm.submit(all_command([0, 0, math.pi/2, 0, 0, math.pi], 100, 5))
+            except ValueError as e:
+                self.error(e)
 
     def open_controls(self):
         self.control_tabs.setCurrentIndex(2)
@@ -605,8 +612,9 @@ class Window(QMainWindow):
         playing = bool(self.arm and self.arm.playing)
         torque_busy = bool(self.arm and (self.arm.torque_pending or self.arm.torque_fault))
         self.cartesian_pad.refresh()
+        inside = fresh and base_in_sector(self.shared.pose.get('b'), feedback=True)
         for btn in self.motion:
-            btn.setEnabled(fresh and not teaching and not playing and not torque_busy)
+            btn.setEnabled(inside and not teaching and not playing and not torque_busy)
         self.hold_btn.setEnabled(fresh and not teaching and not torque_busy)
         self.teach_btn.setEnabled(fresh and not playing and not (self.arm and self.arm.torque_pending))
         self.teach_btn.setText('恢复扭矩 · 锁定当前位置' if teaching or (fresh and all(self.shared.pose.get('torswitch'+k)==0 for k in ('B','S','E','T','R','G'))) else '释放扭矩 · 手动示教')

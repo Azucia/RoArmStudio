@@ -3,10 +3,10 @@ import math
 from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QEvent, QTimer, QSize
 from PySide6.QtGui import QPainter, QColor, QPen, QFont, QPainterPath
 from PySide6.QtWidgets import QWidget, QGroupBox, QHBoxLayout, QVBoxLayout, QLabel, QPushButton, QApplication, QLineEdit, QAbstractSpinBox, QPlainTextEdit, QStackedWidget, QDoubleSpinBox, QFormLayout
-from backend import pose_command
+from backend import BASE_FEEDBACK_ERROR, pose_command
 from PySide6.QtWidgets import QCheckBox, QScrollArea, QSizePolicy
 from host_direct import prepare, holding_offset
-from host_control import TargetIntent
+from host_control import TargetIntent, base_in_sector
 
 
 class XYDisc(QWidget):
@@ -393,7 +393,10 @@ class CartesianPad(QGroupBox):
             enabled = (not self.owner.arm.teaching and not self.owner.arm.playing
                        and not self.owner.arm.torque_pending and not self.owner.arm.torque_fault)
             self.state.setText('单位 mm · 实际反馈' if enabled else '示教 / 回放中 · 方向控制已暂停')
-            if getattr(self.owner.arm,'host_busy',False):
+            if not base_in_sector(self.owner.shared.pose.get('b'), feedback=True):
+                enabled = False
+                self.state.setText(BASE_FEEDBACK_ERROR)
+            elif getattr(self.owner.arm,'host_busy',False):
                 self.state.setText('电脑轨迹定位中 · 关节跟随检查')
         except ValueError:
             self.target_intent.clear()
