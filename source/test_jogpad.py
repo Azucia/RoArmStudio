@@ -13,6 +13,8 @@ APP = QApplication.instance() or QApplication([])
 
 
 class DummyArm:
+    port = 'COM-TEST'
+    last_joint_target = None
     connected = True
     teaching = False
     playing = False
@@ -136,7 +138,7 @@ class JogTests(unittest.TestCase):
         w.control_tabs.setCurrentIndex(1)
         APP.processEvents()
         self.assertFalse(pad.eventFilter(w, key(Qt.Key_W)))
-        w.control_tabs.setCurrentIndex(0)
+        w.control_tabs.setCurrentIndex(3)
         w.cam_index.setFocus()
         APP.processEvents()
         self.assertFalse(pad.eventFilter(w, key(Qt.Key_W)))

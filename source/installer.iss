@@ -43,7 +43,7 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked
 [Files]
 Source: "{#SourceRoot}\程序\RoarmStudio\RoarmStudio.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceRoot}\程序\RoarmStudio\_internal\*"; DestDir: "{app}\_internal"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{#SourceRoot}\assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion
+Source: "{#SourceRoot}\assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#SourceRoot}\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#SourceRoot}\使用说明.md"; DestDir: "{app}"; Flags: ignoreversion
 

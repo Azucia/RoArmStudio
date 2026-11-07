@@ -1,10 +1,10 @@
 """Discrete Cartesian jog pad; every click uses fresh measured position."""
 import math
-from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QEvent, QTimer
+from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QEvent, QTimer, QSize
 from PySide6.QtGui import QPainter, QColor, QPen, QFont, QPainterPath
 from PySide6.QtWidgets import QWidget, QGroupBox, QHBoxLayout, QVBoxLayout, QLabel, QPushButton, QApplication, QLineEdit, QAbstractSpinBox, QPlainTextEdit, QStackedWidget, QDoubleSpinBox, QFormLayout
 from backend import pose_command
-from PySide6.QtWidgets import QCheckBox,QScrollArea
+from PySide6.QtWidgets import QCheckBox, QScrollArea, QSizePolicy
 from host_direct import prepare, holding_offset
 from host_control import TargetIntent
 
@@ -16,8 +16,8 @@ class XYDisc(QWidget):
 
     def __init__(self):
         super().__init__()
-        self.setMinimumSize(224, 224)
-        self.setMaximumSize(240, 240)
+        self.setMinimumSize(148, 148)
+        self.setMaximumSize(212, 212)
         self.setFocusPolicy(Qt.StrongFocus)
         self.setCursor(Qt.PointingHandCursor)
         self.setAccessibleName('XY 末端方向盘：WASD 移动，中心回中')
@@ -29,6 +29,9 @@ class XYDisc(QWidget):
         self.drag_origin = None
         self.dragged = False
         self.setMouseTracking(True)
+
+    def sizeHint(self):
+        return QSize(210, 210)
 
     def geometry_values(self):
         return self.width()/2, self.height()/2, min(self.width(), self.height())/2-5
@@ -122,7 +125,6 @@ class XYDisc(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         cx, cy, radius = self.geometry_values()
-        dark=self.window().property("uiTheme")=="dark"
         for ring, (inner, outer, step) in enumerate(((.24, .64, 1), (.64, 1., 10))):
             for direction, (axis, sign) in enumerate(((0, 1), (1, 1), (0, -1), (1, -1))):
                 start = direction*90-43
@@ -137,25 +139,25 @@ class XYDisc(QWidget):
                 path.closeSubpath()
                 hover = self.hovered == (axis, sign*step) and self.motion_enabled
                 pressed = self.pressed == (axis, sign*step)
-                colors=('#517a90','#405e72','#334a5a','#293c49') if dark else ('#aab9e4','#bfcbed','#d4daf0','#e0e4f3')
+                colors = ('#315a80', '#283d50', '#242a31', '#202327')
                 p.fillPath(path,QColor(colors[0 if pressed else 1 if hover else 2 if ring==0 else 3]))
-                p.setPen(QPen(QColor('#8195ca' if pressed else '#bac5e1'), 2 if pressed else 1))
+                p.setPen(QPen(QColor('#73bfff' if pressed else '#424a53'), 2 if pressed else 1))
                 p.drawPath(path)
                 angle = math.radians(direction*90)
                 distance = radius*(inner+outer)/2
                 tx, ty = cx+distance*math.cos(angle), cy-distance*math.sin(angle)
-                p.setPen(QColor(('#f1f4f7' if self.motion_enabled else '#becbd6') if dark else ('#4f5e91' if self.motion_enabled else '#8490ad')))
-                p.setFont(QFont('Microsoft YaHei UI', 11))
+                p.setPen(QColor('#f1f4f7' if self.motion_enabled else '#a7b2bd'))
+                p.setFont(QFont('Microsoft YaHei UI', 8 if radius < 84 else 9))
                 text = ('X' if axis == 0 else 'Y')+('+' if sign > 0 else '−')+f'{step}'
                 p.drawText(QRectF(tx-29, ty-13, 58, 26), Qt.AlignCenter, text)
-        p.setPen(QPen(QColor('#879bcf'), 1.5))
-        p.setBrush(QColor('#99addf' if self.pressed == 'home' else '#a7b4e4' if self.hovered == 'home' else '#bec8ec'))
+        p.setPen(QPen(QColor('#50606d'), 1))
+        p.setBrush(QColor('#315a80' if self.pressed == 'home' else '#283d50' if self.hovered == 'home' else '#15171a'))
         p.drawEllipse(QPointF(cx, cy), radius*.22, radius*.22)
-        p.setPen(QColor('#4e5c8e'))
-        p.setFont(QFont('Microsoft YaHei UI', 11))
+        p.setPen(QColor('#e8eef5'))
+        p.setFont(QFont('Microsoft YaHei UI', 9))
         p.drawText(QRectF(cx-radius*.22, cy-12, radius*.44, 24), Qt.AlignCenter, '回中')
         if self.hasFocus():
-            p.setPen(QPen(QColor('#9daedf'), 1))
+            p.setPen(QPen(QColor('#73bfff'), 1))
             p.setBrush(Qt.NoBrush)
             p.drawEllipse(QPointF(cx, cy), radius+2, radius+2)
 
@@ -163,17 +165,20 @@ class XYDisc(QWidget):
 class CartesianPad(QGroupBox):
     def __init__(self, owner):
         super().__init__('')
+        self.setObjectName('jogPad')
         self.owner = owner
         self.target_intent = TargetIntent()
         self.jog_offset = [0.0]*6
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(5, 1, 5, 1)
+        layout.setSpacing(4)
         self.position = QLabel('X  —     Y  —     Z  —')
         self.position.setObjectName('coordinates')
-        layout.addWidget(self.position)
+        self.position.setAlignment(Qt.AlignCenter)
         self.state = QLabel('等待实际末端坐标')
         self.state.setObjectName('quiet')
-        layout.addWidget(self.state)
         self.mode_stack = QStackedWidget()
+        self.mode_stack.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Ignored)
         layout.addWidget(self.mode_stack)
         disc_page = QWidget()
         row = QHBoxLayout(disc_page)
@@ -186,15 +191,15 @@ class CartesianPad(QGroupBox):
         self.disc.home.connect(owner.home)
         row.addWidget(self.disc)
         zcol = QVBoxLayout()
-        zcol.addWidget(QLabel('Z · 高度'))
+        zcol.addStretch()
         self.buttons = []
-        for label, delta in (('↑ 10 mm', 10), ('↑ 1 mm', 1), ('↓ 1 mm', -1), ('↓ 10 mm', -10)):
+        for label, delta in (('Z+10', 10), ('Z+1', 1), ('Z−1', -1), ('Z−10', -10)):
             button = QPushButton(label)
-            button.setMinimumWidth(100)
-            button.setMinimumHeight(35)
+            button.setMinimumWidth(54)
             button.clicked.connect(lambda checked=False, d=delta: self.move(2, d))
             self.buttons.append(button)
             zcol.addWidget(button)
+        zcol.addStretch()
         row.addLayout(zcol)
         row.addStretch()
         precise_page = QWidget()
@@ -219,12 +224,20 @@ class CartesianPad(QGroupBox):
         precise_layout.addWidget(QLabel('保留当前俯仰、旋转和夹爪角度。'))
         precise_layout.addStretch()
         self.mode_stack.addWidget(precise_page)
-        info = QVBoxLayout()
-        hint = QLabel('内圈 1 mm · 外圈 10 mm\nWASD 移动 XY，Q / E 升降\nShift 10 mm · 空格取消后续动作')
+        self.mode_stack.setMinimumHeight(disc_page.minimumSizeHint().height())
+        self.jog_status = QWidget()
+        info = QHBoxLayout(self.jog_status)
+        info.setContentsMargins(7, 3, 7, 4)
+        self.execution_mode = QLabel()
+        self.execution_mode.setAlignment(Qt.AlignCenter)
+        self.execution_mode.setToolTip('回放采用已设定的带载关节容差后，会显示降标执行。')
+        self.set_execution_mode(False)
+        info.addWidget(self.execution_mode, 1)
+        hint = QLabel('内圈 1 mm · 外圈 10 mm\nWASD / Q E')
         hint.setToolTip('每次点击或按键移动一步，按住不连发；编辑输入框时不触发快捷键。中心回中会请求恢复初始姿态。')
         hint.setObjectName('quiet')
         hint.setWordWrap(True)
-        info.addWidget(hint)
+        info.addWidget(hint, 1)
         self.control_settings = QWidget()
         control_layout = QVBoxLayout(self.control_settings)
         self.computer_mode = QCheckBox('电脑逆解（发送关节角）')
@@ -249,23 +262,29 @@ class CartesianPad(QGroupBox):
         self.grip_open.clicked.connect(lambda: owner.grip(False))
         grip_row.addWidget(self.grip_close)
         grip_row.addWidget(self.grip_open)
-        info.addLayout(grip_row)
-        info.addStretch()
-        self.more = QPushButton('切换到精确 XYZ 输入')
+        control_layout.addLayout(grip_row)
+        self.more = QPushButton('精确 XYZ 输入')
         self.more.clicked.connect(self.switch_mode)
-        info.addWidget(self.more)
         stop = QPushButton('取消后续动作 / 回放')
         stop.setObjectName('stop')
         stop.setToolTip('取消待发动作；已发送的目标可能继续执行，不改写保持目标、不释放扭矩。')
         stop.clicked.connect(owner.hold)
         control_layout.addWidget(stop)
-        layout.addLayout(info)
         QApplication.instance().installEventFilter(self)
+
+    def set_execution_mode(self, degraded):
+        name, text = ('degradedMode', '● 降标执行') if degraded else ('strictMode', '● 严格执行')
+        if self.execution_mode.objectName() != name:
+            self.execution_mode.setObjectName(name)
+            self.execution_mode.setText(text)
+            self.execution_mode.style().unpolish(self.execution_mode)
+            self.execution_mode.style().polish(self.execution_mode)
 
     def switch_mode(self):
         index = 1-self.mode_stack.currentIndex()
         self.mode_stack.setCurrentIndex(index)
-        self.more.setText('切换到方向盘 / WASD' if index else '切换到精确 XYZ 输入')
+        self.mode_stack.setMinimumHeight(self.mode_stack.currentWidget().minimumSizeHint().height())
+        self.more.setText('返回轮盘 / WASD' if index else '精确 XYZ 输入')
         if index and self.owner.fresh():
             self.copy_xyz()
 

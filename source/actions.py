@@ -82,6 +82,7 @@ class Playback(Worker):
         self.factor, self.speed, self.acc = factor, speed, acc
         self.token = arm.begin_replay()
         self.progress = 0.
+        self.degraded = False
         self.error = None
 
     def ensure(self):
@@ -128,6 +129,7 @@ class Playback(Worker):
                     if anchor is None or max(abs(v-w) for v,w in zip(q,anchor[1]))>math.radians(.35):
                         anchor=(stamp,q)
                     elif stamp-anchor[0]>=.45:
+                        self.degraded = True
                         self.shared.event('带载关节已停稳，按实测容差继续回放')
                         return
                 else:

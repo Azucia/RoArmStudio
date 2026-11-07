@@ -4,7 +4,7 @@ __pycache__/
 *.spec
 build/
 dist/
-绋嬪簭/
+程序/
 captures/
 work/
 runtime.log
