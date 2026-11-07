@@ -8,6 +8,11 @@ from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import QWidget
 
 
+GRID_X = (-75, 675)  # mm; leave one cell behind the base
+GRID_Y = (-450, 450)
+GRID_STEP = 75
+
+
 def rotate_z(angle):
     s, c = math.sin(angle), math.cos(angle)
     return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
@@ -50,7 +55,8 @@ class ArmGeometry:
 
 
 def view_matrix():
-    toward = np.array([1., -2., 1.25])
+    # Orbit the viewer so the floor and model turn clockwise together.
+    toward = rotate_z(math.pi / 4) @ np.array([.4, -1., .48])
     toward /= np.linalg.norm(toward)
     right = np.array([-toward[1], toward[0], 0])
     right /= np.linalg.norm(right)
@@ -63,6 +69,11 @@ class ArmView(QWidget):
         self.setMinimumHeight(150)
         self.setAccessibleName('RoArm-M3 关节反馈姿态')
         self.view = view_matrix()
+        floor = np.array([(x, y, 0) for x in GRID_X for y in GRID_Y]) @ self.view
+        self.floor_min = floor[:, :2].min(axis=0)
+        self.floor_max = floor[:, :2].max(axis=0)
+        # Reserve height for the arm so ordinary motion doesn't change the framing.
+        self.floor_max[1] = max(self.floor_max[1], 300)
         self.angles = None
         self.triangles = None
         self.message = '等待机械臂反馈'
@@ -87,23 +98,35 @@ class ArmView(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor('#080b0f'))
-        scale = min(self.width() / 880, self.height() / 665)
-        cx, cy = self.width() * .49, self.height() * .79
+        lower, upper = self.floor_min, self.floor_max
+        if self.triangles is not None:
+            vertices = self.triangles[:, :, :2]
+            lower = np.minimum(lower, vertices.min(axis=(0, 1)))
+            upper = np.maximum(upper, vertices.max(axis=(0, 1)))
+        left, bottom = lower
+        right, top = upper
+        cx, cy = self.width() * .29, self.height() * .46
+        margin = 12
+        scale = min((cx - margin) / -left, (self.width() - cx - margin) / right,
+                    (cy - margin) / top, (self.height() - cy - margin) / -bottom)
 
         def point(world):
             x, y, _ = np.asarray(world) @ self.view
             return QPointF(cx + x * scale, cy - y * scale)
 
+        x_min, x_max = GRID_X
+        y_min, y_max = GRID_Y
         painter.setPen(QPen(QColor('#23313f'), 1))
-        for offset in range(-450, 451, 75):
-            painter.drawLine(point((-450, offset, 0)), point((450, offset, 0)))
-            painter.drawLine(point((offset, -450, 0)), point((offset, 450, 0)))
+        for y in range(y_min, y_max + 1, GRID_STEP):
+            painter.drawLine(point((x_min, y, 0)), point((x_max, y, 0)))
+        for x in range(x_min, x_max + 1, GRID_STEP):
+            painter.drawLine(point((x, y_min, 0)), point((x, y_max, 0)))
         for color, tip in (('#c66b64', (100, 0, 0)), ('#5eab82', (0, 100, 0)), ('#639bd7', (0, 0, 100))):
             painter.setPen(QPen(QColor(color), 1.5))
             painter.drawLine(point((0, 0, 0)), point(tip))
         if self.triangles is None:
             painter.setPen(QColor('#b4bfca'))
-            painter.drawText(self.rect(), Qt.AlignCenter, self.message)
+            painter.drawText(self.rect().adjusted(12, 12, -12, -12), Qt.AlignLeft | Qt.AlignTop, self.message)
             return
 
         triangles = self.triangles

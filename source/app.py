@@ -346,7 +346,7 @@ class Window(QMainWindow):
         self.tcp.setObjectName('quiet')
         self.tcp.setContentsMargins(8, 3, 8, 3)
         pose_layout.addWidget(self.tcp)
-        right.addWidget(pose, 3)
+        right.addWidget(pose, 4)
         cameras = QHBoxLayout()
         cameras.setSpacing(6)
         for view in self.views:
