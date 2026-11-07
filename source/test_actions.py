@@ -4,6 +4,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 from actions import load_trajectory, TeachRecorder, Playback
 from backend import Shared, Arm, KEYS, pose_command, public_command, all_command
@@ -116,6 +117,56 @@ class ActionTests(unittest.TestCase):
             arm.stop.set()
             arm.join(2)
             self.assertFalse(any('_epoch' in row for row in FakeSerial.instances[-1].writes))
+
+    def test_dense_replay_at_double_speed_keeps_waypoints_and_only_settles_at_ends(self):
+        shared = Shared()
+        arm = Arm(shared, 'TEST')
+        arm.connected = True
+        start = [0., 0., math.pi/2, 0., 0., math.pi]
+        shared.pose = dict(zip(KEYS, start))
+        records = [dict(time=i/10, radians=[i*.003, *start[1:]]) for i in range(11)]
+        player = Playback(shared, arm, records, factor=2)
+        now = 0.
+        writes = []
+
+        def advance(deadline):
+            nonlocal now
+            now = deadline
+
+        def send(target):
+            writes.append((now, target.copy()))
+            shared.pose = dict(zip(KEYS, target))
+            shared.pose_time = now
+
+        with patch('actions.time', SimpleNamespace(monotonic=lambda: now)), \
+             patch.object(player, 'wait_until', side_effect=advance), \
+             patch.object(player, 'send', side_effect=send), \
+             patch.object(player, 'wait_target') as settle:
+            player.run()
+        self.assertIsNone(player.error)
+        self.assertEqual(settle.call_count, 2)
+        self.assertEqual([angles for _, angles in writes], [r['radians'] for r in records])
+        self.assertAlmostEqual(writes[-1][0], .5)
+
+    def test_replay_pauses_for_lagging_wrist_even_in_degraded_mode(self):
+        shared = Shared()
+        arm = Arm(shared, 'TEST')
+        arm.connected = True
+        start = [0., 0., math.pi/2, 0., 0., math.pi]
+        shared.pose = dict(zip(KEYS, start))
+        shared.pose_time = time.monotonic()
+        records = [dict(time=i, radians=[*start[:3], i*.12, *start[4:]]) for i in range(3)]
+        player = Playback(shared, arm, records)
+        player.degraded = True
+        with patch.object(player, 'wait_until'), patch.object(player, 'send') as send, \
+             patch.object(player, 'wait_target', side_effect=[None, RuntimeError('手腕未到位')]) as settle:
+            player.run()
+        self.assertEqual(player.error, '手腕未到位')
+        last_target = send.call_args.args[0]
+        self.assertGreater(last_target[3], .07)
+        self.assertLess(last_target[3], records[-1]['radians'][3])
+        self.assertEqual(settle.call_args.args[0], last_target)
+        self.assertFalse(arm.playing)
 
 
 if __name__ == '__main__':

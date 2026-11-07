@@ -23,6 +23,7 @@ from jogpad import CartesianPad
 from appearance import STYLE, CameraScreen, TitleBar
 from arm_view import ArmView
 from workbench import Diagnostics, StatusStrip, panel
+from studio_api import DeviceAPI
 
 BASE = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).resolve().parent.parent
 
@@ -116,11 +117,12 @@ class Window(QMainWindow):
         self.control_tabs = QTabBar()
         self.control_tabs.setExpanding(False)
         self.control_tabs.setDrawBase(False)
-        for name in ('视觉工作台', '关节控制', '示教', '控制/连接'):
+        for name in ('视觉工作台', '关节控制', '示教', '设备/连接'):
             self.control_tabs.addTab(name)
         outer.addWidget(TitleBar(self, self.control_tabs, VERSION))
         self.status_strip = StatusStrip(self.hold)
         outer.addWidget(self.status_strip)
+        self.external_api = DeviceAPI(self.shared, lambda: self.arm)
         self.control_pages = QStackedWidget()
         self.control_pages.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Ignored)
         self.control_pages.setMinimumHeight(150)
@@ -195,7 +197,14 @@ class Window(QMainWindow):
         self.acc.setToolTip('单位：100 步/秒²；只用于关节控制与回放')
         row.addWidget(self.acc)
         l.addLayout(row)
-        self.motion.append(self.button(l, '回初始位', self.home))
+        row = QHBoxLayout()
+        self.home_down = QPushButton('夹爪朝前')
+        self.home_down.setCheckable(True)
+        self.home_down.setToolTip('切换回中方向。轮盘中心和「回初始位」使用同一个设置。')
+        self.home_down.toggled.connect(lambda down: self.home_down.setText('夹爪朝下 90°' if down else '夹爪朝前'))
+        row.addWidget(self.home_down)
+        self.motion.append(self.button(row, '回初始位', self.home))
+        l.addLayout(row)
         l.addStretch()
         self.hold_btn = self.button(l, '取消后续动作 / 回放', self.hold)
         self.hold_btn.setToolTip('取消待发动作；已发送的目标可能继续执行，不改写保持目标、不释放扭矩。')
@@ -282,6 +291,22 @@ class Window(QMainWindow):
         QVBoxLayout(device_box).addWidget(device)
         link_page=QWidget()
         link_layout=QVBoxLayout(link_page)
+        api_box = QGroupBox('对外连接 · 仅本机')
+        api_layout = QVBoxLayout(api_box)
+        row = QHBoxLayout()
+        row.addWidget(QLabel('端口'))
+        self.api_port = QSpinBox()
+        self.api_port.setRange(1024, 65535)
+        self.api_port.setValue(self.prefs.value('apiPort', 8765, type=int))
+        row.addWidget(self.api_port, 1)
+        self.api_toggle = self.button(row, '启动接口', self.toggle_api)
+        api_layout.addLayout(row)
+        self.api_state = QLabel('接口未启动')
+        self.api_state.setWordWrap(True)
+        api_layout.addWidget(self.api_state)
+        self.api_copy = self.button(api_layout, '复制连接信息', self.copy_api_connection)
+        self.api_copy.setEnabled(False)
+        link_layout.addWidget(api_box)
         link_layout.addWidget(self.cartesian_pad.computer_mode)
         link_layout.addWidget(self.cartesian_pad.control_settings)
         link_layout.addWidget(self.connection_box)
@@ -289,7 +314,7 @@ class Window(QMainWindow):
         for section in self.settings_sections:
             link_layout.addWidget(section)
         link_layout.addStretch()
-        self.add_control_page('控制/连接', link_page)
+        self.add_control_page('设备/连接', link_page)
         self.refresh_ports()
         self.auto_timer=QTimer(self)
         self.auto_timer.timeout.connect(self.try_previous)
@@ -355,6 +380,38 @@ class Window(QMainWindow):
         btn.clicked.connect(fn)
         layout.addWidget(btn)
         return btn
+
+    def toggle_api(self):
+        if self.external_api.server is not None:
+            self.external_api.stop()
+            self.note('已停止对外连接')
+        else:
+            try:
+                url = self.external_api.start(self.api_port.value())
+            except OSError as error:
+                self.error(f'本机接口启动失败：{error}')
+                return
+            self.prefs.setValue('apiPort', self.api_port.value())
+            self.note(f'对外连接已启动：{url}')
+        self.refresh_api()
+
+    def copy_api_connection(self):
+        server = self.external_api.server
+        if server is not None:
+            data = {'url': f'http://127.0.0.1:{server.server_port}', 'token': self.external_api.secret}
+            QApplication.clipboard().setText(json.dumps(data))
+            self.note('已复制本机接口连接信息')
+
+    def refresh_api(self):
+        self.external_api.profile = (self.speed.value(), self.acc.value(), self.cartesian_pad.z_feedforward.value(),
+                                     self.home_down.isChecked(), self.far.value(), self.alpha.value()/100)
+        self.external_api.poll()
+        server = self.external_api.server
+        self.api_port.setEnabled(server is None)
+        self.api_copy.setEnabled(server is not None)
+        self.api_toggle.setText('停止接口' if server else '启动接口')
+        owner = '外部控制中' if self.external_api.lease else '等候外部调用'
+        self.api_state.setText(f'127.0.0.1:{server.server_port} · {owner}' if server else '接口未启动')
 
     def note(self, text):
         self.log.appendPlainText(datetime.now().strftime('%H:%M:%S')+'  '+text)
@@ -528,10 +585,12 @@ class Window(QMainWindow):
         if not base_in_sector(self.shared.pose.get('b'), feedback=True):
             self.error(BASE_FEEDBACK_ERROR)
             return
-        if QMessageBox.question(self, '回中 · 官方初始姿态',
-            '会移动所有关节到初始姿态（不是将 XYZ 清零，也不改写中位）。确认周围没有障碍？') == QMessageBox.Yes:
+        down = self.home_down.isChecked()
+        direction = '朝下 90°' if down else '朝前'
+        if QMessageBox.question(self, f'回中 · 夹爪{direction}',
+            f'将移动各关节到回中姿态，夹爪{direction}。请确认整条运动路径和夹爪下方留有空间。') == QMessageBox.Yes:
             try:
-                self.arm.submit(all_command([0, 0, math.pi/2, 0, 0, math.pi], 100, 5))
+                self.arm.submit(all_command([0, 0, math.pi/2, math.pi/2 if down else 0, 0, math.pi], 100, 5))
             except ValueError as e:
                 self.error(e)
 
@@ -546,6 +605,9 @@ class Window(QMainWindow):
 
     def set_teaching(self, release):
         if not self.fresh() or self.arm.torque_pending:
+            return
+        if self.arm.external_deadline is not None:
+            self.error('请先结束外部控制。')
             return
         text = ('请先托住机械臂及末端负载。确认安全固件后将直接释放扭矩，不预先移动关节。\n'
                 '只有七个舵机都回读为关闭，才会显示“已释放”。继续？' if release else
@@ -587,6 +649,7 @@ class Window(QMainWindow):
             self.note('开始采集：主机接收时间对齐，不是硬件同步。')
 
     def tick(self):
+        self.refresh_api()
         while not self.shared.events.empty():
             self.note(self.shared.events.get_nowait())
         for kind in ('uvc','gemini'):
@@ -639,7 +702,12 @@ class Window(QMainWindow):
         self.tcp.setText('TCP · ' + ' / '.join(f'{x:.1f}' for x in coords) + ' mm' if valid_tcp
                          else 'TCP · 等待反馈')
         replay = self.controls.playback
-        self.cartesian_pad.set_execution_mode(bool(replay and replay.arm is self.arm and replay.degraded))
+        if self.external_api.lease:
+            detail = self.external_api.execution_detail
+            self.cartesian_pad.state.setText('外部控制中 · 本机 API')
+            self.cartesian_pad.set_execution_mode(bool(detail), detail)
+        else:
+            self.cartesian_pad.update_execution_mode(replay)
         if self.shared.pose:
             for label, key in zip(self.actual, KEYS):
                 label.setText(f'{math.degrees(self.shared.pose[key]):.1f}°'+('' if fresh else ' 旧'))
@@ -701,6 +769,7 @@ class Window(QMainWindow):
                 view.show_image(overlay, 'D2C 已对齐'+suffix)
 
     def closeEvent(self, event):
+        self.external_api.stop()
         self.auto_paused=True
         self.auto_timer.stop()
         alive = [w for w in self.workers if w.is_alive()]

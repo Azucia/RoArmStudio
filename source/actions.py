@@ -6,6 +6,13 @@ from pathlib import Path
 from backend import Worker, KEYS, NAMES, all_command, check_radians, FEEDBACK_TIMEOUT, torque_disabled
 
 
+REPLAY_PERIOD = .05
+STEPS_PER_RAD = 2048 / math.pi
+STRICT_TOLERANCE = .07
+LOADED_TOLERANCES = (STRICT_TOLERANCE, math.radians(6), math.radians(6),
+                     STRICT_TOLERANCE, STRICT_TOLERANCE, STRICT_TOLERANCE)
+
+
 def load_trajectory(path, sdk=False):
     path = Path(path)
     if path.stat().st_size > 50*1024*1024:
@@ -121,11 +128,10 @@ class Playback(Worker):
             if pose and stamp>stamp_before:
                 q=[pose[k] for k in KEYS]
                 errors=[abs(v-t) for v,t in zip(q,target)]
-                if max(errors)<.07:
+                if max(errors) < STRICT_TOLERANCE:
                     return
                 # Only the loaded shoulder/elbow may settle slightly outside 4 degrees.
-                tolerances=(.07,math.radians(6),math.radians(6),.07,.07,.07)
-                if all(e<=limit for e,limit in zip(errors,tolerances)):
+                if all(e <= limit for e, limit in zip(errors, LOADED_TOLERANCES)):
                     if anchor is None or max(abs(v-w) for v,w in zip(q,anchor[1]))>math.radians(.35):
                         anchor=(stamp,q)
                     elif stamp-anchor[0]>=.45:
@@ -140,28 +146,52 @@ class Playback(Worker):
                 raise RuntimeError(f'{NAMES[i]}未到位：目标 {math.degrees(target[i]):.1f}°，实测 {math.degrees(pose[KEYS[i]]):.1f}°，回放已停止')
             self.stop.wait(.05)
 
+    def wait_until(self, deadline):
+        while True:
+            self.ensure()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            self.stop.wait(min(remaining, REPLAY_PERIOD))
+
+    def wait_if_lagging(self, target):
+        with self.shared.lock:
+            pose = self.shared.pose
+        limits = LOADED_TOLERANCES if self.degraded else (STRICT_TOLERANCE,) * len(KEYS)
+        if any(abs(pose[k] - value) > limit for k, value, limit in zip(KEYS, target, limits)):
+            self.wait_target(target, 5)
+
     def run(self):
         try:
             self.ensure()
             first = self.records[0]['radians']
             delta = max(abs(self.shared.pose[k]-v) for k, v in zip(KEYS, first))
-            self.shared.event('回放：先低速到达首帧位置')
+            self.shared.event('回放：先移动到首帧位置')
             self.send(first)
-            self.wait_target(first, delta*2048/math.pi/self.speed+15)
+            self.wait_target(first, delta * STEPS_PER_RAD / self.speed + 15)
+            last_target = first
+            last_update = time.monotonic()
             for i in range(1, len(self.records)):
                 a, b = self.records[i-1], self.records[i]
                 duration = max((b['time']-a['time'])/self.factor,
-                               max(abs(x-y) for x, y in zip(a['radians'], b['radians']))*2048/math.pi/self.speed,
-                               .1)
-                start = time.monotonic()
-                while True:
-                    ratio = min(1., (time.monotonic()-start)/duration)
-                    self.send([x+(y-x)*ratio for x, y in zip(a['radians'], b['radians'])])
-                    if ratio >= 1:
-                        break
-                    self.stop.wait(.1)
-                self.wait_target(b['radians'], duration+5)
-                self.progress = i/(len(self.records)-1)
+                               max(abs(x-y) for x, y in zip(a['radians'], b['radians'])) * STEPS_PER_RAD / self.speed,
+                               REPLAY_PERIOD)
+                samples = max(1, int(duration / REPLAY_PERIOD))
+                interval = duration / samples
+                for sample in range(1, samples + 1):
+                    self.wait_until(last_update + interval)
+                    self.wait_if_lagging(last_target)
+                    # Resume from the current time after a tracking pause, without a burst of overdue targets.
+                    last_update = time.monotonic()
+                    ratio = sample / samples
+                    last_target = (b['radians'] if sample == samples else
+                                   [x + (y - x) * ratio for x, y in zip(a['radians'], b['radians'])])
+                    self.send(last_target)
+                if i < len(self.records) - 1:
+                    self.progress = i / (len(self.records) - 1)
+            if len(self.records) > 1:
+                self.wait_target(last_target, 5)
+            self.progress = 1.
             self.shared.event('示教回放完成')
         except InterruptedError:
             self.shared.event('示教回放已停止')

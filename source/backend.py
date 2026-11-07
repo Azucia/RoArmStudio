@@ -162,9 +162,12 @@ class CommandReceipt:
     def __init__(self):
         self.done = threading.Event()
         self.error = None
+        self.written_at = None
 
     def finish(self, error=None):
         self.error = error
+        if error is None:
+            self.written_at = time.monotonic()
         self.done.set()
 
 
@@ -184,6 +187,7 @@ class Arm(Worker):
         self.command_lock = threading.RLock()
         self.epoch = 0
         self.playing = False
+        self.external_deadline = None
         self.torque_pending = False
         self.torque_fault = False
         self.torque_state = '未确认'
@@ -216,6 +220,7 @@ class Arm(Worker):
         with self.command_lock:
             self.epoch += 1
             self.playing = False
+            self.external_deadline = None
             self.host_busy = False
             while not self.commands.empty():
                 try:
@@ -225,6 +230,8 @@ class Arm(Worker):
 
     def begin_replay(self):
         with self.command_lock:
+            if self.playing:
+                raise ValueError('机械臂已有控制任务')
             if self.teaching or self.torque_pending or self.torque_fault:
                 raise ValueError('扭矩未确认保持，不能开始回放')
             self.cancel_replay()
@@ -281,6 +288,9 @@ class Arm(Worker):
             if self.stop.is_set():
                 self.cancel_replay()
                 return
+            if self.external_deadline is not None and (time.monotonic() >= self.external_deadline or
+                    any((self.shared.pose or {}).get('torswitch'+key) != 1 for key in ('B','S','E','T','R','G'))):
+                self.cancel_replay()
             if stale and self.last_joint_target is not None:
                 self.last_joint_target = None
                 self.reference_generation += 1
@@ -431,6 +441,8 @@ class TorqueChange(Worker):
         self.arm, self.release = arm, release
         self.error = None
         with arm.command_lock:
+            if arm.external_deadline is not None:
+                raise ValueError('请先结束外部控制')
             if not arm.connected or arm.torque_pending:
                 raise ValueError('机械臂未连接或正在切换扭矩')
             arm.cancel_replay()

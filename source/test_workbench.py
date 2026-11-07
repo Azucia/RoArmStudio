@@ -3,12 +3,13 @@ import time
 import unittest
 from threading import Event
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtGui import QWheelEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from app import Window
 from appearance import TitleBar
@@ -143,3 +144,19 @@ class WorkbenchTests(unittest.TestCase):
         self.assertIsNotNone(receipt.error)
         self.assertTrue(w.arm.commands.empty())
         w.controls.playback = None
+
+    def test_joint_page_home_selector_is_shared_by_the_jog_disc(self):
+        w = self.window
+        self.assertTrue(w.joint_panel.isAncestorOf(w.home_down))
+        self.assertFalse(w.home_down.isChecked())
+        with patch('app.QMessageBox.question', return_value=QMessageBox.Yes):
+            w.cartesian_pad.disc.home.emit()
+            forward = w.arm.commands.get_nowait()
+            w.home_down.click()
+            self.assertTrue(w.arm.commands.empty())
+            w.cartesian_pad.disc.home.emit()
+            down = w.arm.commands.get_nowait()
+        self.assertEqual(forward['wrist'], 0)
+        self.assertEqual(down['wrist'], math.pi / 2)
+        for key in ('base', 'shoulder', 'elbow', 'roll', 'hand'):
+            self.assertEqual(down[key], forward[key])
