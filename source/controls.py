@@ -106,7 +106,7 @@ class Controls(QDialog):
         layout.addLayout(row)
         self.play_state = QLabel('未开始')
         layout.addWidget(self.play_state)
-        text = QLabel('回放从首帧开始，速度受关节速度上限约束。\n请先结束手动示教并托稳机械臂。')
+        text = QLabel('倍率调整轨迹时间，实际速度受关节上限和跟随误差约束。\n请先结束手动示教并托稳机械臂。')
         text.setWordWrap(True)
         layout.addWidget(text)
         self.button(layout, '取消后续动作 / 回放', self.owner.hold).setObjectName('stop')

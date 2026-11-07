@@ -68,6 +68,14 @@ jobs:
           Copy-Item -Recurse licenses "$dir/licenses"
           Copy-Item 使用说明.md,THIRD_PARTY_NOTICES.md $dir
           Compress-Archive "$dir/*" "dist/RoarmStudio-$env:STUDIO_VERSION-Windows-x64.zip"
+          python -m pip wheel --no-deps ./sdk -w dist
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $wheel = Get-ChildItem dist/roarmstudio_sdk-*.whl
+          if ($wheel.Name -ne "roarmstudio_sdk-$env:STUDIO_VERSION.0-py3-none-any.whl") { throw 'SDK wheel version mismatch' }
+          python -m pip install --no-deps $wheel.FullName
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python -c "from roarmstudio_sdk import Studio; assert callable(Studio.from_connection)"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           $sums=Get-ChildItem dist -File | Sort-Object Name | ForEach-Object { "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)" }
           $sums | Set-Content -Encoding ascii dist/SHA256SUMS.txt
       - uses: actions/upload-artifact@v4

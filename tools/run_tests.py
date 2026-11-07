@@ -12,6 +12,7 @@ def main():
     root = Path(__file__).resolve().parent.parent
     sys.path.insert(0, str(root / 'source'))
     sys.path.insert(0, str(root / 'tools'))
+    sys.path.insert(0, str(root / 'sdk'))
     from PySide6.QtCore import QSettings
 
     with tempfile.TemporaryDirectory() as settings:

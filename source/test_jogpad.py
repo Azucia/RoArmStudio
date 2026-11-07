@@ -165,7 +165,7 @@ class JogTests(unittest.TestCase):
         self.assertAlmostEqual(command['t'], .2)
         self.assertAlmostEqual(command['r'], .3)
         self.assertAlmostEqual(command['g'], 1.08)
-        self.assertEqual(w.control_tabs.tabText(3), "控制/连接")
+        self.assertEqual(w.control_tabs.tabText(3), "设备/连接")
         w.close()
 
 

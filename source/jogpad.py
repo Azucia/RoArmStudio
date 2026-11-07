@@ -5,7 +5,7 @@ from PySide6.QtGui import QPainter, QColor, QPen, QFont, QPainterPath
 from PySide6.QtWidgets import QWidget, QGroupBox, QHBoxLayout, QVBoxLayout, QLabel, QPushButton, QApplication, QLineEdit, QAbstractSpinBox, QPlainTextEdit, QStackedWidget, QDoubleSpinBox, QFormLayout
 from backend import BASE_FEEDBACK_ERROR, pose_command
 from PySide6.QtWidgets import QCheckBox, QScrollArea, QSizePolicy
-from host_direct import prepare, holding_offset
+from host_direct import plan_xyz, holding_offset
 from host_control import TargetIntent, base_in_sector
 
 
@@ -169,6 +169,7 @@ class CartesianPad(QGroupBox):
         self.owner = owner
         self.target_intent = TargetIntent()
         self.jog_offset = [0.0]*6
+        self.xyz_degradation = ''
         layout = QVBoxLayout(self)
         layout.setContentsMargins(5, 1, 5, 1)
         layout.setSpacing(4)
@@ -239,7 +240,7 @@ class CartesianPad(QGroupBox):
         self.precise_go.setObjectName('primary')
         self.precise_go.clicked.connect(self.move_xyz)
         precise_layout.addWidget(self.precise_go)
-        precise_layout.addWidget(QLabel('保留当前俯仰、旋转和夹爪角度。'))
+        precise_layout.addWidget(QLabel('优先保留姿态，目标不可达时降标。'))
         precise_layout.addStretch()
         self.mode_stack.addWidget(precise_page)
         self.mode_stack.setMinimumHeight(disc_page.minimumSizeHint().height())
@@ -248,7 +249,6 @@ class CartesianPad(QGroupBox):
         info.setContentsMargins(7, 3, 7, 4)
         self.execution_mode = QLabel()
         self.execution_mode.setAlignment(Qt.AlignCenter)
-        self.execution_mode.setToolTip('回放采用已设定的带载关节容差后，会显示降标执行。')
         self.set_execution_mode(False)
         info.addWidget(self.execution_mode, 1)
         hint = QLabel('内圈 1 mm · 外圈 10 mm\nWASD / Q E')
@@ -289,13 +289,24 @@ class CartesianPad(QGroupBox):
         control_layout.addWidget(stop)
         QApplication.instance().installEventFilter(self)
 
-    def set_execution_mode(self, degraded):
+    def set_execution_mode(self, degraded, detail=''):
         name, text = ('degradedMode', '● 降标执行') if degraded else ('strictMode', '● 严格执行')
+        tip = detail or '电脑逆解优先严格执行，回放优先使用严格到位容差。'
+        if self.execution_mode.toolTip() != tip:
+            self.execution_mode.setToolTip(tip)
         if self.execution_mode.objectName() != name:
             self.execution_mode.setObjectName(name)
             self.execution_mode.setText(text)
             self.execution_mode.style().unpolish(self.execution_mode)
             self.execution_mode.style().polish(self.execution_mode)
+
+    def update_execution_mode(self, replay):
+        xyz_current = self.target_intent.key == self.intent_key()
+        if replay and replay.arm is self.owner.arm and (self.owner.arm.playing or not xyz_current):
+            self.set_execution_mode(replay.degraded, '回放采用带载关节容差。' if replay.degraded else '')
+        else:
+            detail = self.xyz_degradation if xyz_current else ''
+            self.set_execution_mode(bool(detail), detail)
 
     def switch_mode(self):
         index = 1-self.mode_stack.currentIndex()
@@ -356,20 +367,28 @@ class CartesianPad(QGroupBox):
     def send_xyz(self, values, measured_angles, offset=None):
         if self.computer_mode.isChecked():
             if not self.owner.fresh():raise ValueError('缺少新鲜的关节反馈')
+            key = self.intent_key()
             with self.owner.shared.lock:
                 measured=[self.owner.shared.pose[k] for k in ('b','s','e','t','r','g')]
+            reference = self.owner.arm.last_joint_target
+            reference = reference.copy() if reference is not None else None
             bias=self.z_feedforward.value()
             offset = [0.0]*6 if offset is None else offset
-            solve_values = [v+d for v,d in zip(values,offset)]
-            extra = max(0.0,bias-offset[2])
-            cmd,joints=prepare(solve_values,measured,self.owner.speed.value(),self.owner.acc.value(),extra)
+            cmd, joints, accepted, detail = plan_xyz(values, measured, self.owner.speed.value(),
+                self.owner.acc.value(), bias, offset, reference, allow_degraded=True)
+            if key != self.intent_key():
+                raise ValueError('运动基准已更新，请重试')
             # Internal routing flag is consumed by Arm before serializing JSON.
             # Direct PC jogs retain intent; manual angle/home commands invalidate it.
             self.owner.arm.submit(dict(cmd,_host_intent=True))
+            self.xyz_degradation = detail
+            self.set_execution_mode(bool(detail), detail)
+            if detail:
+                self.owner.shared.event(f'XYZ 降标执行：{detail}')
             for widget,angle in zip(self.owner.targets,joints):widget.setValue(math.degrees(angle))
-            self.owner.shared.event(f'电脑逆解 Z目标 {values[2]:.2f} mm，前馈 +{bias:.1f} mm，保持偏移 {offset[2]:+.2f} mm，求解 Z {solve_values[2]+extra:.2f} mm，关节目标 {cmd}')
+            self.owner.shared.event(f'电脑逆解 Z目标 {values[2]:.2f} mm，接受 {accepted[2]:.2f} mm，前馈 +{bias:.1f} mm，保持偏移 {offset[2]:+.2f} mm，关节目标 {cmd}')
             self.jog_offset = offset
-            self.target_intent.commit(values,self.intent_key())
+            self.target_intent.commit(accepted, key)
         else:
             self.owner.arm.submit(pose_command(values,measured_angles))
 

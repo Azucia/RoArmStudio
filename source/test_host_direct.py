@@ -2,7 +2,7 @@ import math,json,time,unittest
 from unittest.mock import patch
 from host_direct import prepare, holding_offset
 from host_control import forward
-from backend import all_command,Arm,Shared,KEYS
+from backend import all_command, check_radians, Arm, Shared, KEYS
 from test_backend import FakeSerial
 
 class FullFeedbackSerial(FakeSerial):
@@ -36,6 +36,31 @@ class Tests(unittest.TestCase):
         goal[0]+=45
         _,sent=prepare(goal[:3]+list(map(math.degrees,goal[3:])),q,150,5)
         self.assertLess(math.dist(forward(sent)[:3],goal[:3]),1e-6)
+
+    def test_degraded_xyz_prefers_position_then_approaches_along_requested_direction(self):
+        home = [0, 0, math.pi/2, 0, 0, math.pi]
+        target = [500, 0, 223.13, 0, 0, 180]
+        with self.assertRaises(ValueError):
+            prepare(target, home, 150, 5)
+        _, joints = prepare(target, home, 150, 5, allow_degraded=True, reference=home)
+        reached = forward(joints)
+        self.assertLess(math.dist(reached[:3], target[:3]), 1e-6)
+        self.assertNotAlmostEqual(reached[3], 0)
+        self.assertEqual(joints[4:], home[4:])
+
+        target = [490, 0, 450, 0, 0, 180]
+        _, joints = prepare(target, home, 150, 5, allow_degraded=True, reference=home)
+        start, reached = forward(home), forward(check_radians(joints))
+        fraction = (reached[0] - start[0]) / (target[0] - start[0])
+        self.assertTrue(0 < fraction < 1)
+        self.assertAlmostEqual(reached[2], start[2] + (target[2] - start[2]) * fraction)
+
+    def test_degraded_xyz_respects_sector_and_preserved_gripper_limits(self):
+        home = [0, 0, math.pi/2, 0, 0, math.pi]
+        for target, reason in (([-400, 0, 223, 0, 0, 180], '105'),
+                               ([490, 0, 450, 0, 0, 181], '夹爪')):
+            with self.subTest(target=target), self.assertRaisesRegex(ValueError, reason):
+                prepare(target, home, 150, 5, allow_degraded=True, reference=home)
 
     def test_first_z_jog_preserves_loaded_home_and_following_xy_holds_z(self):
         held=[0,0,math.pi/2,0,0,math.pi]
