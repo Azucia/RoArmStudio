@@ -52,6 +52,7 @@ class StatusStrip(QWidget):
         row.addStretch()
         self.stop = QPushButton('急停')
         self.stop.setObjectName('emergency')
+        self.stop.setMinimumSize(128, 38)
         self.stop.setToolTip('软件取消待发动作与回放。已发送的目标可能继续执行。')
         self.stop.clicked.connect(stop)
         row.addWidget(self.stop)

@@ -339,7 +339,7 @@ class Window(QMainWindow):
         body.addWidget(sidebar, 3)
         right = QVBoxLayout()
         right.setSpacing(6)
-        pose, pose_layout = panel('机械臂状态', 'RoArm-M3 · 官方模型')
+        pose, pose_layout = panel('机械臂状态')
         pose_layout.addWidget(self.arm_view, 1)
         self.tcp = QLabel('TCP · 等待反馈')
         self.tcp.setObjectName('quiet')
