@@ -17,7 +17,8 @@ class XYDisc(QWidget):
     def __init__(self):
         super().__init__()
         self.setMinimumSize(148, 148)
-        self.setMaximumSize(212, 212)
+        self.setMaximumSize(350, 350)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setFocusPolicy(Qt.StrongFocus)
         self.setCursor(Qt.PointingHandCursor)
         self.setAccessibleName('XY 末端方向盘：WASD 移动，中心回中')
@@ -125,6 +126,7 @@ class XYDisc(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         cx, cy, radius = self.geometry_values()
+        p.setFont(QFont('Microsoft YaHei UI', min(14, max(8, round(radius / 11)))))
         for ring, (inner, outer, step) in enumerate(((.24, .64, 1), (.64, 1., 10))):
             for direction, (axis, sign) in enumerate(((0, 1), (1, 1), (0, -1), (1, -1))):
                 start = direction*90-43
@@ -147,14 +149,12 @@ class XYDisc(QWidget):
                 distance = radius*(inner+outer)/2
                 tx, ty = cx+distance*math.cos(angle), cy-distance*math.sin(angle)
                 p.setPen(QColor('#f1f4f7' if self.motion_enabled else '#a7b2bd'))
-                p.setFont(QFont('Microsoft YaHei UI', 8 if radius < 84 else 9))
                 text = ('X' if axis == 0 else 'Y')+('+' if sign > 0 else '−')+f'{step}'
                 p.drawText(QRectF(tx-29, ty-13, 58, 26), Qt.AlignCenter, text)
         p.setPen(QPen(QColor('#50606d'), 1))
         p.setBrush(QColor('#315a80' if self.pressed == 'home' else '#283d50' if self.hovered == 'home' else '#15171a'))
         p.drawEllipse(QPointF(cx, cy), radius*.22, radius*.22)
         p.setPen(QColor('#e8eef5'))
-        p.setFont(QFont('Microsoft YaHei UI', 9))
         p.drawText(QRectF(cx-radius*.22, cy-12, radius*.44, 24), Qt.AlignCenter, '回中')
         if self.hasFocus():
             p.setPen(QPen(QColor('#73bfff'), 1))
@@ -172,9 +172,26 @@ class CartesianPad(QGroupBox):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(5, 1, 5, 1)
         layout.setSpacing(4)
-        self.position = QLabel('X  —     Y  —     Z  —')
+        self.position = QWidget()
         self.position.setObjectName('coordinates')
-        self.position.setAlignment(Qt.AlignCenter)
+        coords = QHBoxLayout(self.position)
+        coords.setContentsMargins(5, 6, 5, 6)
+        coords.setSpacing(3)
+        self.coordinate_values = []
+        for axis in 'XYZ':
+            cell = QHBoxLayout()
+            cell.setSpacing(3)
+            name = QLabel(axis)
+            name.setObjectName('coordinateAxis')
+            value = QLabel('—')
+            value.setObjectName('coordinateValue')
+            value.setAccessibleName(f'{axis} 实际坐标（毫米）')
+            cell.addStretch()
+            cell.addWidget(name)
+            cell.addWidget(value)
+            cell.addStretch()
+            coords.addLayout(cell, 1)
+            self.coordinate_values.append(value)
         self.state = QLabel('等待实际末端坐标')
         self.state.setObjectName('quiet')
         self.mode_stack = QStackedWidget()
@@ -183,31 +200,32 @@ class CartesianPad(QGroupBox):
         disc_page = QWidget()
         row = QHBoxLayout(disc_page)
         row.setContentsMargins(0, 0, 0, 0)
-        row.addStretch()
         self.mode_stack.addWidget(disc_page)
         self.disc = XYDisc()
         self.disc.jog.connect(self.move)
         self.disc.halt.connect(owner.hold)
         self.disc.home.connect(owner.home)
-        row.addWidget(self.disc)
+        row.addWidget(self.disc, 1)
         zcol = QVBoxLayout()
         zcol.addStretch()
         self.buttons = []
         for label, delta in (('Z+10', 10), ('Z+1', 1), ('Z−1', -1), ('Z−10', -10)):
             button = QPushButton(label)
-            button.setMinimumWidth(54)
+            button.setObjectName('jogZ')
+            button.setMinimumWidth(58)
             button.clicked.connect(lambda checked=False, d=delta: self.move(2, d))
             self.buttons.append(button)
             zcol.addWidget(button)
         zcol.addStretch()
         row.addLayout(zcol)
-        row.addStretch()
         precise_page = QWidget()
         precise_layout = QVBoxLayout(precise_page)
         form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         self.xyz_targets = []
         for axis, limit in zip('XYZ', (500, 500, 600)):
             spin = QDoubleSpinBox()
+            spin.setObjectName('xyzTarget')
             spin.setRange(-limit, limit)
             spin.setDecimals(1)
             spin.setSuffix(' mm')
@@ -236,7 +254,6 @@ class CartesianPad(QGroupBox):
         hint = QLabel('内圈 1 mm · 外圈 10 mm\nWASD / Q E')
         hint.setToolTip('每次点击或按键移动一步，按住不连发；编辑输入框时不触发快捷键。中心回中会请求恢复初始姿态。')
         hint.setObjectName('quiet')
-        hint.setWordWrap(True)
         info.addWidget(hint, 1)
         self.control_settings = QWidget()
         control_layout = QVBoxLayout(self.control_settings)
@@ -313,7 +330,7 @@ class CartesianPad(QGroupBox):
         focus = QApplication.focusWidget()
         current = focus
         while current:
-            if isinstance(current, (QLineEdit, QAbstractSpinBox, QPlainTextEdit)):
+            if isinstance(current, (QLineEdit, QAbstractSpinBox, QPlainTextEdit)) or current.property('captionControl'):
                 return False
             current = current.parentWidget()
         keys = {Qt.Key_W: (1, 1), Qt.Key_S: (1, -1), Qt.Key_A: (0, -1), Qt.Key_D: (0, 1),
@@ -387,9 +404,10 @@ class CartesianPad(QGroupBox):
 
     def refresh(self):
         enabled = False
+        coordinates = ('—',) * 3
         try:
             values = self.actual()
-            self.position.setText('   '.join(f'{axis}  {value:.1f}' for axis, value in zip('XYZ', values)))
+            coordinates = tuple(f'{value:.1f}' for value in values[:3])
             enabled = (not self.owner.arm.teaching and not self.owner.arm.playing
                        and not self.owner.arm.torque_pending and not self.owner.arm.torque_fault)
             self.state.setText('单位 mm · 实际反馈' if enabled else '示教 / 回放中 · 方向控制已暂停')
@@ -400,8 +418,10 @@ class CartesianPad(QGroupBox):
                 self.state.setText('电脑轨迹定位中 · 关节跟随检查')
         except ValueError:
             self.target_intent.clear()
-            self.position.setText('X  —     Y  —     Z  —')
             self.state.setText('离线 / 坐标过期 · 方向控制已暂停')
+        for label, text in zip(self.coordinate_values, coordinates):
+            if label.text() != text:
+                label.setText(text)
         self.disc.motion_enabled = enabled
         self.disc.update()
         for button in self.buttons:

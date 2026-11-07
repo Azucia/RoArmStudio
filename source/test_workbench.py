@@ -11,6 +11,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from app import Window
+from appearance import TitleBar
 from backend import Arm, KEYS, all_command
 
 APP = QApplication.instance() or QApplication([])
@@ -25,7 +26,7 @@ class WorkbenchTests(unittest.TestCase):
         self.publish_pose((0., .3, 1.1, -.2, 0., math.pi))
 
     def publish_pose(self, values):
-        self.window.shared.pose = dict(zip(KEYS, values), T=1051, x=242.6, y=53.2, z=184.)
+        self.window.shared.pose = dict(zip(KEYS, values), T=1051, x=242.6, y=53.2, z=184., tit=0.)
         self.window.shared.pose.update({'torswitch'+k: 1 for k in ('B', 'S', 'E', 'T', 'R', 'G')})
         self.window.shared.pose_time = time.monotonic()
 
@@ -37,6 +38,7 @@ class WorkbenchTests(unittest.TestCase):
         self.assertIsNotNone(w.arm_view.geometry)
         self.assertGreater(len(w.arm_view.triangles), 100)
         self.assertIn('242.6', w.tcp.text())
+        self.assertEqual([value.text() for value in w.cartesian_pad.coordinate_values], ['242.6', '53.2', '184.0'])
         self.assertEqual(w.diagnostics.angles.item(1, 2).text(), '+17.2')
         first = w.arm_view.triangles.copy()
         self.publish_pose((.5, .3, 1.1, -.2, 0., math.pi))
@@ -46,6 +48,37 @@ class WorkbenchTests(unittest.TestCase):
         w.tick()
         self.assertIsNone(w.arm_view.triangles)
         self.assertEqual(w.diagnostics.angles.item(1, 2).text(), '—')
+        self.assertTrue(all(value.text() == '—' for value in w.cartesian_pad.coordinate_values))
+
+    def test_top_tabs_replace_only_the_left_control_panel(self):
+        w = self.window
+        w.resize(1093, 614)
+        w.show()
+        APP.processEvents()
+        w.tick()
+        APP.processEvents()
+        shared_views = (w.diagnostics, w.arm_view, *w.views)
+        original_sizes = [view.size() for view in shared_views]
+        for index in (1, 2, 3, 0):
+            w.control_tabs.setCurrentIndex(index)
+            APP.processEvents()
+            self.assertEqual(w.control_pages.currentIndex(), index)
+            self.assertEqual(w.cartesian_pad.isVisible(), index == 0)
+            self.assertTrue(all(view.isVisible() for view in shared_views))
+            self.assertEqual([view.size() for view in shared_views], original_sizes)
+
+    def test_integrated_caption_toggles_window_state(self):
+        w = self.window
+        w.show()
+        APP.processEvents()
+        title = w.findChild(TitleBar)
+        self.assertFalse(bool(w.windowFlags() & Qt.WindowTitleHint))
+        title.maximize.click()
+        self.assertTrue(w.isMaximized())
+        self.assertEqual(title.maximize.accessibleName(), '还原窗口')
+        QTest.mouseDClick(title, Qt.LeftButton, pos=title.rect().center())
+        self.assertFalse(w.isMaximized())
+        self.assertEqual(title.maximize.accessibleName(), '最大化')
 
     def test_two_camera_previews_and_disconnect(self):
         w = self.window
