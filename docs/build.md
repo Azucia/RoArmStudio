@@ -18,7 +18,7 @@ python tools/run_tests.py
 python source/build.py
 ```
 
-程序输出到 `程序/RoarmStudio/`。使用 Inno Setup 6 编译 `source/installer.iss`，传入 `SourceRoot` 为仓库绝对路径、`ReleaseOutput` 为安装包输出目录。完整步骤以发布工作流为准。
+程序输出到 `程序/RoarmStudio/`。使用 Inno Setup 6 编译 `source/installer.iss`，传入 `MyAppVersion` 为 `source/version.py` 中的版本、`SourceRoot` 为仓库绝对路径、`ReleaseOutput` 为安装包输出目录。完整步骤以发布工作流为准。
 
 测试入口同时执行桌面和 USB 更新客户端的离线测试，使用临时设置文件并禁止真实串口、相机访问。普通源码变更和 PR 由独立测试工作流检查，不依赖修改版本号或发布安装包。
 

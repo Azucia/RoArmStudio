@@ -5,13 +5,22 @@ on:
     paths:
       - '.github/workflows/windows-release.yml'
       - 'source/version.py'
+  pull_request:
+    paths:
+      - '.github/workflows/windows-release.yml'
+      - 'source/version.py'
+      - 'source/installer.iss'
+      - 'source/build.py'
+      - 'docs/release-*.md'
   workflow_dispatch:
 permissions:
-  contents: write
+  contents: read
 jobs:
   package:
     runs-on: windows-2022
     timeout-minutes: 35
+    outputs:
+      version: ${{ steps.version.outputs.value }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -25,32 +34,67 @@ jobs:
           python tools/run_tests.py
       - name: Build Windows program
         run: python source/build.py
+      - name: Read release version
+        id: version
+        shell: pwsh
+        run: |
+          $version = python -c "import sys; sys.path.insert(0, 'source'); from version import VERSION; print(VERSION)"
+          if ($LASTEXITCODE -or $version -notmatch '^\d+(\.\d+){1,3}$') { throw 'Invalid desktop version' }
+          if (!(Test-Path "docs/release-$version.md")) { throw "Missing release notes for $version" }
+          "value=$version" >> $env:GITHUB_OUTPUT
       - name: Build and smoke-test per-user installer
         shell: pwsh
+        env:
+          STUDIO_VERSION: ${{ steps.version.outputs.value }}
         run: |
           $root=(Get-Location).Path
           New-Item -ItemType Directory -Force dist | Out-Null
           $iscc="${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          & $iscc "/DSourceRoot=$root" "/DReleaseOutput=$root\dist" source/installer.iss
+          & $iscc "/DMyAppVersion=$env:STUDIO_VERSION" "/DSourceRoot=$root" "/DReleaseOutput=$root\dist" source/installer.iss
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          $setup=Get-Item dist/RoarmStudio-1.0-Setup-x64.exe
+          $setup=Get-Item "dist/RoarmStudio-$env:STUDIO_VERSION-Setup-x64.exe"
           $dest=Join-Path $env:RUNNER_TEMP 'installed-studio'
-          $proc=Start-Process $setup.FullName -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=`"$dest`"" -Wait -PassThru
+          $proc=Start-Process $setup.FullName -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=`"$dest`"" -WindowStyle Hidden -Wait -PassThru
           if ($proc.ExitCode -ne 0) { throw "Installer failed: $($proc.ExitCode)" }
           $env:QT_QPA_PLATFORM='offscreen'
-          $proc=Start-Process "$dest\RoarmStudio.exe" -ArgumentList '--smoke' -Wait -PassThru
+          $proc=Start-Process "$dest\RoarmStudio.exe" -ArgumentList '--smoke' -WindowStyle Hidden -Wait -PassThru
           if ($proc.ExitCode -ne 0 -or !(Test-Path "$dest\界面预览.png")) { Get-Content "$dest\runtime.log"; throw 'Installed GUI smoke test failed' }
-      - name: Assemble packages and publish version 1.0
+      - name: Assemble Windows packages
         shell: pwsh
         env:
-          GH_TOKEN: ${{ github.token }}
+          STUDIO_VERSION: ${{ steps.version.outputs.value }}
         run: |
           $dir='程序/RoarmStudio'
           Copy-Item -Recurse licenses "$dir/licenses"
           Copy-Item 使用说明.md,THIRD_PARTY_NOTICES.md $dir
-          Compress-Archive "$dir/*" dist/RoarmStudio-1.0-Windows-x64.zip
-          Copy-Item firmware/RoarmStudio-1.0-Teach-app.bin dist/
+          Compress-Archive "$dir/*" "dist/RoarmStudio-$env:STUDIO_VERSION-Windows-x64.zip"
           $sums=Get-ChildItem dist -File | Sort-Object Name | ForEach-Object { "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)" }
           $sums | Set-Content -Encoding ascii dist/SHA256SUMS.txt
-          $files=Get-ChildItem dist -File | ForEach-Object FullName
-          gh release create v1.0 @files --target $env:GITHUB_SHA --title 'RoarmStudio 1.0' --notes-file docs/release-1.0.md --latest
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          path: dist/
+          if-no-files-found: error
+          compression-level: 0
+
+  publish:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: package
+    runs-on: windows-2022
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-release
+          path: dist
+      - name: Publish Windows release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STUDIO_VERSION: ${{ needs.package.outputs.version }}
+        run: |
+          $version = $env:STUDIO_VERSION
+          $files = Get-ChildItem dist -File | ForEach-Object FullName
+          gh release create "v$version" @files --target $env:GITHUB_SHA --title "RoarmStudio $version" --notes-file "docs/release-$version.md" --latest

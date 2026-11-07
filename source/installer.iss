@@ -1,4 +1,6 @@
-#define MyAppVersion "1.0"
+#ifndef MyAppVersion
+  #error Pass /DMyAppVersion using the version from source/version.py
+#endif
 #ifndef SourceRoot
   #define SourceRoot ".."
 #endif
@@ -11,8 +13,8 @@ AppId={{BB1807C1-D5CD-43E1-AB2A-E2563D50D8C9}
 AppName=RoarmStudio
 AppVersion={#MyAppVersion}
 AppPublisher=Azucia
-VersionInfoVersion=1.0.0.0
-VersionInfoProductVersion=1.0.0.0
+VersionInfoVersion={#MyAppVersion}
+VersionInfoProductVersion={#MyAppVersion}
 DefaultDirName={localappdata}\Programs\RoarmStudio
 DefaultGroupName=RoarmStudio
 PrivilegesRequired=lowest
