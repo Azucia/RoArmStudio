@@ -1,4 +1,4 @@
-# RoarmStudio 1.1
+# RoarmStudio 2.0
 
 RoarmStudio 是为 RoArm-M3-Pro 开发的 Windows 桌面工作台。**V1.0有关XYZ的逆运动学全部在软件端计算。** 用户给出目标XYZ，软件端将**需要到达的坐标**换算成机械臂的六个关节角，通过 USB 串口直接发一条 JSON 指令（`T=102`）。机械臂通过 `T=105` 回报关节角和模型坐标。这条控制路径无需刷写固件。
 
