@@ -1,5 +1,7 @@
 from contextlib import closing
 import math
+from tempfile import TemporaryDirectory
+from threading import Event, Thread
 import time
 import unittest
 import uuid
@@ -8,6 +10,7 @@ import cv2
 import numpy as np
 
 from backend import Arm, KEYS, Shared, all_command
+from actions import TeachLibrary, save_trajectory
 from host_control import forward
 from roarmstudio_sdk import SDKError, Studio
 from studio_api import DeviceAPI
@@ -26,6 +29,16 @@ class DeviceAPITests(unittest.TestCase):
         self.url = self.api.start(0)
         self.addCleanup(self.api.stop)
         self.client = Studio(self.url, self.api.secret)
+
+    def teach_fixture(self):
+        temp = TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        library = TeachLibrary(temp.name)
+        for slot in (1, 12):
+            end = self.home.copy()
+            end[0] = slot / 1000
+            save_trajectory(library.path(slot), [dict(time=0, radians=self.home), dict(time=.2, radians=end)])
+        self.api.teach_library = library
 
     def feedback(self, joints):
         x, y, z, pitch, _, _ = forward(joints)
@@ -109,3 +122,58 @@ class DeviceAPITests(unittest.TestCase):
         self.assertTrue(self.arm.commands.empty())
         with self.assertRaises(SDKError):
             self.client.grip(False)
+
+    def test_named_teach_slots_play_sequentially_under_one_lease(self):
+        self.teach_fixture()
+        slots = self.client.teach_slots()
+        self.assertEqual(len(slots), 12)
+        self.assertEqual([slot['name'] for slot in slots if slot['occupied']], ['示教1', '示教12'])
+        self.client.acquire()
+        with self.assertRaises(SDKError) as missing:
+            self.client.play_teach('示教2')
+        self.assertEqual(missing.exception.code, 'teach_empty')
+        with self.assertRaises(SDKError) as invalid:
+            self.client.play_teach('示教13')
+        self.assertEqual(invalid.exception.code, 'invalid_slot')
+        serial = FakeSerial()
+        stop = Event()
+
+        def drive():
+            while not stop.wait(.035):
+                self.arm._write_pending(serial)
+                self.feedback(self.arm.last_joint_target or self.home)
+
+        driver = Thread(target=drive)
+        driver.start()
+        try:
+            for slot in ('示教1', '示教12'):
+                key = uuid.uuid4()
+                action = self.client.play_teach(slot, request_id=key)
+                self.assertEqual(self.client.play_teach(slot, request_id=key)['id'], action['id'])
+                with self.assertRaises(SDKError) as busy:
+                    self.client.home()
+                self.assertEqual(busy.exception.code, 'action_busy')
+                result = self.client.wait(action['id'], timeout=5)
+                self.assertEqual(result['state'], 'reached')
+                self.assertEqual(result['progress'], 1.)
+                self.assertTrue(result['serial_written'])
+                self.assertTrue(self.arm.playing)
+            self.assertAlmostEqual(self.arm.last_joint_target[0], .012)
+            self.client.release()
+        finally:
+            stop.set()
+            driver.join(2)
+
+    def test_teach_cancel_clears_pending_motion(self):
+        self.teach_fixture()
+        self.client.acquire()
+        action = self.client.play_teach('示教1')
+        deadline = time.monotonic() + .5
+        while self.arm.commands.empty() and time.monotonic() < deadline:
+            time.sleep(.005)
+        self.assertFalse(self.arm.commands.empty())
+        self.client.cancel_pending()
+        serial = FakeSerial()
+        self.arm._write_pending(serial)
+        self.assertEqual(serial.writes, [])
+        self.assertEqual(self.client.action(action['id'])['state'], 'cancelled')

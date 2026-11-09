@@ -114,10 +114,34 @@ class ActionTests(unittest.TestCase):
         worker=Thread(target=simulate,args=(5,));worker.start()
         player.wait_target(target,1.5)
         worker.join()
+        self.assertTrue(player.loaded_tolerance)
+        self.assertTrue(player.degraded)
         worker=Thread(target=simulate,args=(12,));worker.start()
         with self.assertRaisesRegex(RuntimeError,'肩.*12.0'):
             player.wait_target(target,.5)
         worker.join()
+
+    def test_loaded_tolerance_with_small_tcp_error_stays_strict(self):
+        shared = Shared()
+        arm = Arm(shared, 'TEST')
+        arm.connected = True
+        player = Playback(shared, arm, [])
+        target = [0., math.radians(-70), math.radians(160), math.radians(30), 0., math.pi]
+        observed = [0., math.radians(-65), *target[2:]]
+        shared.pose = dict(zip(KEYS, observed))
+        now = 1.
+        shared.pose_time = now
+
+        def advance(seconds):
+            nonlocal now
+            now += seconds
+            shared.pose_time = now
+
+        with patch('actions.time', SimpleNamespace(monotonic=lambda: now)), patch.object(player.stop, 'wait', advance):
+            player.wait_target(target, 1.)
+        self.assertTrue(player.loaded_tolerance)
+        self.assertAlmostEqual(player.xyz_error_mm, 6.5364, places=3)
+        self.assertFalse(player.degraded)
 
     def test_replay_and_cancel_token(self):
         shared = Shared()
@@ -160,10 +184,13 @@ class ActionTests(unittest.TestCase):
 
         def advance(deadline):
             nonlocal now
-            now = deadline
+            now = max(now, deadline)
 
         def send(target):
+            nonlocal now
             writes.append((now, target.copy()))
+            if len(writes) > 1:
+                now += .025
             shared.pose = dict(zip(KEYS, target))
             shared.pose_time = now
 
@@ -177,6 +204,21 @@ class ActionTests(unittest.TestCase):
         self.assertEqual([angles for _, angles in writes], [r['radians'] for r in records])
         self.assertAlmostEqual(writes[-1][0], .5)
 
+    def test_replay_sends_first_frame_as_one_target(self):
+        shared = Shared()
+        arm = Arm(shared, 'TEST')
+        arm.connected = True
+        start = [0., .1, 1.3, 0., 0., math.pi]
+        target = [0., .32, 1.42, -.08, 0., math.pi]
+        shared.pose = dict(zip(KEYS, start))
+        shared.pose_time = time.monotonic()
+        player = Playback(shared, arm, [dict(time=0., radians=target)])
+        with patch.object(player, 'send') as send, patch.object(player, 'wait_target') as settle:
+            player.run()
+        self.assertIsNone(player.error)
+        send.assert_called_once_with(target)
+        settle.assert_called_once()
+
     def test_replay_pauses_for_lagging_wrist_even_in_degraded_mode(self):
         shared = Shared()
         arm = Arm(shared, 'TEST')
@@ -186,7 +228,7 @@ class ActionTests(unittest.TestCase):
         shared.pose_time = time.monotonic()
         records = [dict(time=i, radians=[*start[:3], i*.12, *start[4:]]) for i in range(3)]
         player = Playback(shared, arm, records)
-        player.degraded = True
+        player.loaded_tolerance = True
         with patch.object(player, 'wait_until'), patch.object(player, 'send') as send, \
              patch.object(player, 'wait_target', side_effect=[None, RuntimeError('手腕未到位')]) as settle:
             player.run()

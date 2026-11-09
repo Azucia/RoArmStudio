@@ -126,6 +126,12 @@ class Studio:
     def grip(self, closed, *, request_id=None):
         return self._action('grip', request_id, closed=closed)
 
+    def teach_slots(self):
+        return self._request('GET', '/v1/teach')
+
+    def play_teach(self, slot, factor=1., *, request_id=None):
+        return self._action('play_teach', request_id, slot=slot, factor=factor)
+
     def action(self, action_id):
         return self._request('GET', '/v1/actions/' + str(uuid.UUID(str(action_id))))
 
@@ -140,7 +146,12 @@ class Studio:
             if now >= deadline:
                 raise TimeoutError('Timed out waiting for action result')
             if self.lease and now >= renew_at:
-                self.renew()
+                try:
+                    self.renew()
+                except SDKError as error:
+                    if error.code != 'invalid_lease':
+                        raise
+                    self.lease = None
                 renew_at = now + 5
             time.sleep(.1)
 

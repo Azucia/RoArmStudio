@@ -6,7 +6,7 @@ from PySide6.QtWidgets import QWidget, QGroupBox, QHBoxLayout, QVBoxLayout, QLab
 from backend import BASE_FEEDBACK_ERROR, pose_command
 from PySide6.QtWidgets import QCheckBox, QScrollArea, QSizePolicy
 from host_direct import plan_xyz, holding_offset
-from host_control import TargetIntent, base_in_sector
+from host_control import TargetIntent, XYZ_DEGRADED_MM, base_in_sector
 
 
 class XYDisc(QWidget):
@@ -291,7 +291,7 @@ class CartesianPad(QGroupBox):
 
     def set_execution_mode(self, degraded, detail=''):
         name, text = ('degradedMode', '● 降标执行') if degraded else ('strictMode', '● 严格执行')
-        tip = detail or '电脑逆解优先严格执行，回放优先使用严格到位容差。'
+        tip = detail or '末端位置偏差超过 10 mm 时显示降标。'
         if self.execution_mode.toolTip() != tip:
             self.execution_mode.setToolTip(tip)
         if self.execution_mode.objectName() != name:
@@ -303,7 +303,8 @@ class CartesianPad(QGroupBox):
     def update_execution_mode(self, replay):
         xyz_current = self.target_intent.key == self.intent_key()
         if replay and replay.arm is self.owner.arm and (self.owner.arm.playing or not xyz_current):
-            self.set_execution_mode(replay.degraded, '回放采用带载关节容差。' if replay.degraded else '')
+            detail = f'回放到位检查：末端偏差 {replay.xyz_error_mm:.1f} mm' if replay.degraded else ''
+            self.set_execution_mode(replay.degraded, detail)
         else:
             detail = self.xyz_degradation if xyz_current else ''
             self.set_execution_mode(bool(detail), detail)
@@ -381,10 +382,11 @@ class CartesianPad(QGroupBox):
             # Internal routing flag is consumed by Arm before serializing JSON.
             # Direct PC jogs retain intent; manual angle/home commands invalidate it.
             self.owner.arm.submit(dict(cmd,_host_intent=True))
-            self.xyz_degradation = detail
-            self.set_execution_mode(bool(detail), detail)
+            miss = math.dist(values[:3], accepted[:3])
+            self.xyz_degradation = f'预计末端偏差 {miss:.1f} mm。{detail}' if miss > XYZ_DEGRADED_MM else ''
+            self.set_execution_mode(bool(self.xyz_degradation), self.xyz_degradation)
             if detail:
-                self.owner.shared.event(f'XYZ 降标执行：{detail}')
+                self.owner.shared.event(f'XYZ {self.xyz_degradation or detail}')
             for widget,angle in zip(self.owner.targets,joints):widget.setValue(math.degrees(angle))
             self.owner.shared.event(f'电脑逆解 Z目标 {values[2]:.2f} mm，接受 {accepted[2]:.2f} mm，前馈 +{bias:.1f} mm，保持偏移 {offset[2]:+.2f} mm，关节目标 {cmd}')
             self.jog_offset = offset

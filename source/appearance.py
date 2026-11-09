@@ -137,6 +137,8 @@ QPushButton#stop, QPushButton#emergency { background:#a41f2a; border-color:#d938
 QPushButton#emergency { padding:3px 17px; font-size:18px; }
 QPushButton#stop:hover, QPushButton#emergency:hover { background:#c92a36; }
 QPushButton#primary { background:#214361; border-color:#4b83b1; }
+QPushButton#teachSlot { padding:4px; }
+QPushButton#teachSlot:checked { background:#214361; border-color:#4b83b1; }
 QPushButton:disabled { color:#79818a; background:#1c1e20; border-color:#303338; }
 QPushButton:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus { border:1px solid #73bfff; }
 QTabWidget::pane { border:0; background:#171819; }

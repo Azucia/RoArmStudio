@@ -3,6 +3,7 @@ import time
 import unittest
 from threading import Event
 from types import SimpleNamespace
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import numpy as np
@@ -14,6 +15,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 from app import Window
 from appearance import TitleBar
 from backend import Arm, KEYS, all_command
+from actions import TeachLibrary, save_trajectory
 
 APP = QApplication.instance() or QApplication([])
 
@@ -134,7 +136,7 @@ class WorkbenchTests(unittest.TestCase):
     def test_replay_state_and_stop_use_existing_paths(self):
         w = self.window
         self.assertIn('严格执行', w.cartesian_pad.execution_mode.text())
-        w.controls.playback = SimpleNamespace(arm=w.arm, degraded=True)
+        w.controls.playback = SimpleNamespace(arm=w.arm, degraded=True, xyz_error_mm=15.)
         w.tick()
         self.assertIn('降标执行', w.cartesian_pad.execution_mode.text())
         cmd = all_command([0., 0., math.pi/2, 0., 0., math.pi])
@@ -160,3 +162,28 @@ class WorkbenchTests(unittest.TestCase):
         self.assertEqual(down['wrist'], math.pi / 2)
         for key in ('base', 'shoulder', 'elbow', 'roll', 'hand'):
             self.assertEqual(down[key], forward[key])
+
+    def test_teach_slots_show_saved_tracks_and_protect_replacements(self):
+        controls = self.window.controls
+        with TemporaryDirectory() as directory:
+            controls.teach_library = TeachLibrary(directory)
+            pose = [0., 0., math.pi/2, 0., 0., math.pi]
+            original = [dict(time=0, radians=pose), dict(time=1, radians=pose)]
+            incoming = [dict(time=0, radians=pose), dict(time=2, radians=pose)]
+            slot = controls.teach_library.path(12)
+            source = slot.with_name('incoming.json')
+            save_trajectory(slot, original)
+            save_trajectory(source, incoming)
+            controls.slot_buttons[12].click()
+            self.assertEqual(len(controls.slot_buttons), 12)
+            self.assertIn('示教12 •', controls.slot_buttons[12].text())
+            self.assertIn('1.0 秒', controls.trajectory_label.text())
+            with patch('controls.QFileDialog.getOpenFileName', return_value=(str(source), 'JSON')):
+                with patch('controls.QMessageBox.question', return_value=QMessageBox.No):
+                    controls.load()
+                self.assertEqual(controls.teach_library.load(12), original)
+                with patch('controls.QMessageBox.question', return_value=QMessageBox.Yes):
+                    controls.load()
+            self.assertEqual(controls.teach_library.load(12), incoming)
+            self.assertTrue(source.is_file())
+            self.assertIn('2.0 秒', controls.trajectory_label.text())

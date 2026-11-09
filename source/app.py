@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 import cv2
-from PySide6.QtCore import Qt, QTimer, QSettings
+from PySide6.QtCore import Qt, QTimer, QSettings, QStandardPaths
 from PySide6.QtGui import QIcon, QImage, QPixmap
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QPushButton,
@@ -24,6 +24,7 @@ from appearance import STYLE, CameraScreen, TitleBar
 from arm_view import ArmView
 from workbench import Diagnostics, StatusStrip, panel
 from studio_api import DeviceAPI
+from actions import TeachLibrary
 
 BASE = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).resolve().parent.parent
 
@@ -122,7 +123,10 @@ class Window(QMainWindow):
         outer.addWidget(TitleBar(self, self.control_tabs, VERSION))
         self.status_strip = StatusStrip(self.hold)
         outer.addWidget(self.status_strip)
-        self.external_api = DeviceAPI(self.shared, lambda: self.arm)
+        data_dir = Path(QStandardPaths.writableLocation(QStandardPaths.GenericDataLocation))
+        self.teach_library = TeachLibrary(data_dir / 'RoArmStudio' / 'teaching')
+        self.external_api = DeviceAPI(self.shared, lambda: self.arm, self.teach_library,
+            lambda: bool(self.controls and self.controls.teach_record and self.controls.teach_record.is_alive()))
         self.control_pages = QStackedWidget()
         self.control_pages.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Ignored)
         self.control_pages.setMinimumHeight(150)
@@ -702,12 +706,18 @@ class Window(QMainWindow):
         self.tcp.setText('TCP · ' + ' / '.join(f'{x:.1f}' for x in coords) + ' mm' if valid_tcp
                          else 'TCP · 等待反馈')
         replay = self.controls.playback
+        teach_target = None
         if self.external_api.lease:
             detail = self.external_api.execution_detail
             self.cartesian_pad.state.setText('外部控制中 · 本机 API')
             self.cartesian_pad.set_execution_mode(bool(detail), detail)
+            if fresh:
+                teach_target = self.external_api.teach_target_angles()
         else:
             self.cartesian_pad.update_execution_mode(replay)
+            if fresh and playing and replay is not None and replay.arm is self.arm:
+                teach_target = replay.target_angles
+        self.arm_view.set_teach_target(teach_target)
         if self.shared.pose:
             for label, key in zip(self.actual, KEYS):
                 label.setText(f'{math.degrees(self.shared.pose[key]):.1f}°'+('' if fresh else ' 旧'))
