@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "roarmstudio-sdk"
-version = "2.0.0"
+version = "2.1.0"
 description = "Local client for RoArmStudio robot control and camera feeds"
 requires-python = ">=3.9"
 

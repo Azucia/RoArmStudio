@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-from actions import load_trajectory, TeachRecorder, Playback
+from actions import load_trajectory, simplify_trajectory, TeachRecorder, Playback
 from backend import Shared, Arm, KEYS, pose_command, public_command, all_command
 from test_backend import FakeSerial
 
@@ -58,15 +58,44 @@ class ActionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             recorder = TeachRecorder(shared, Path(temp)/'动作.json')
             recorder.start()
-            for i in range(4):
-                with shared.lock:
-                    shared.pose = dict(zip(KEYS, [i*.01, 0, 1.57, 0, 0, 3.14]))
-                    shared.pose_time = time.monotonic()
-                time.sleep(.12)
-            recorder.stop.set()
-            recorder.join(2)
+            try:
+                for i in range(4):
+                    with shared.lock:
+                        shared.pose = dict(zip(KEYS, [i*.0005, 0, 1.57, 0, 0, 3.14]))
+                        shared.pose_time = time.monotonic()
+                    deadline = time.monotonic() + 1
+                    while recorder.count <= i and time.monotonic() < deadline:
+                        time.sleep(.01)
+                    self.assertEqual(recorder.count, i + 1)
+            finally:
+                recorder.stop.set()
+                recorder.join(2)
             self.assertIsNone(recorder.error)
+            saved = json.loads(recorder.path.read_text(encoding='utf-8'))
+            self.assertEqual(saved['sample_count'], recorder.count)
             self.assertGreaterEqual(len(load_trajectory(recorder.path)), 2)
+            self.assertLess(len(saved['records']), saved['sample_count'])
+
+    def test_teaching_simplification_uses_original_timestamps(self):
+        records = [dict(time=t, radians=[t*.2, 0., math.pi/2, 0., 0., math.pi])
+                   for t in (0., .08, .23, .32, .5, .7, 1.)]
+        self.assertEqual(simplify_trajectory(records), [records[0], records[-1]])
+
+    def test_teaching_simplification_preserves_dwell_and_reversal(self):
+        records = [dict(time=i/10, radians=[min(i, 10, 30-i)*.01, 0., math.pi/2, 0., 0., math.pi])
+                   for i in range(31)]
+        self.assertEqual(simplify_trajectory(records), [records[i] for i in (0, 10, 20, 30)])
+
+    def test_teaching_simplification_keeps_tcp_and_gripper_details(self):
+        home = [0., 0., math.pi/2, 0., 0., math.pi]
+        # This base angle is within the joint error tolerance, but moves the tool >1 mm.
+        for index, delta in ((0, .0035), (5, -.003)):
+            with self.subTest(joint=index):
+                middle = home.copy()
+                middle[index] += delta
+                records = [dict(time=0., radians=home), dict(time=.1, radians=middle),
+                           dict(time=.2, radians=home)]
+                self.assertEqual(simplify_trajectory(records), records)
 
     def test_loaded_shoulder_must_settle_and_large_error_still_stops(self):
         from threading import Thread

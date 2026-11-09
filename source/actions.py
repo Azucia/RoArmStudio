@@ -4,6 +4,7 @@ import math
 import time
 from pathlib import Path
 from backend import Worker, KEYS, NAMES, all_command, check_radians, FEEDBACK_TIMEOUT, torque_disabled
+from host_control import forward, xy_in_sector
 
 
 REPLAY_PERIOD = .05
@@ -11,6 +12,12 @@ STEPS_PER_RAD = 2048 / math.pi
 STRICT_TOLERANCE = .07
 LOADED_TOLERANCES = (STRICT_TOLERANCE, math.radians(6), math.radians(6),
                      STRICT_TOLERANCE, STRICT_TOLERANCE, STRICT_TOLERANCE)
+KEYFRAME_WINDOW = 64
+ENCODER_STEP = math.tau / 4096
+JOINT_SIMPLIFY_TOLERANCE = math.radians(.25)
+TCP_SIMPLIFY_TOLERANCE_MM = 1.
+PITCH_SIMPLIFY_TOLERANCE = math.radians(.5)
+DWELL_SECONDS = .3
 
 
 def load_trajectory(path, sdk=False):
@@ -43,6 +50,56 @@ def load_trajectory(path, sdk=False):
     return result
 
 
+def simplify_trajectory(records):
+    """Keep original timestamps and bound interpolation error at recorded samples."""
+    if len(records) <= 2:
+        return records
+    times = [record['time'] for record in records]
+    joints = [record['radians'] for record in records]
+    tool_poses = [forward(angles) for angles in joints]
+    last = len(records) - 1
+    anchors = {0, last}
+    dwell = 0
+    for index in range(1, len(records)):
+        gap = times[index] - times[index - 1] > FEEDBACK_TIMEOUT
+        if gap:
+            anchors.update((index - 1, index))
+        moved = any(abs(a - b) > ENCODER_STEP for a, b in zip(joints[index], joints[dwell]))
+        if gap or moved:
+            if times[index - 1] - times[dwell] >= DWELL_SECONDS:
+                anchors.update((dwell, index - 1))
+            dwell = index
+    if times[last] - times[dwell] >= DWELL_SECONDS:
+        anchors.add(dwell)
+
+    # Process bounded windows so even a long recording with many turns is cheap to save.
+    fixed = sorted(anchors.union(range(0, last, KEYFRAME_WINDOW)))
+    kept = set(fixed)
+    spans = list(zip(fixed, fixed[1:]))
+    while spans:
+        left, right = spans.pop()
+        start, end = joints[left], joints[right]
+        duration = times[right] - times[left]
+        worst_error, split = 1., None
+        for index in range(left + 1, right):
+            ratio = (times[index] - times[left]) / duration
+            estimate = [a + (b - a) * ratio for a, b in zip(start, end)]
+            errors = [abs(a - b) for a, b in zip(estimate, joints[index])]
+            tool = forward(estimate)
+            error = max(max(errors[:5]) / JOINT_SIMPLIFY_TOLERANCE,
+                        errors[5] / ENCODER_STEP,
+                        math.dist(tool[:3], tool_poses[index][:3]) / TCP_SIMPLIFY_TOLERANCE_MM,
+                        abs(tool[3] - tool_poses[index][3]) / PITCH_SIMPLIFY_TOLERANCE)
+            if not xy_in_sector(*tool[:2]):
+                error = math.inf
+            if error > worst_error:
+                worst_error, split = error, index
+        if split is not None:
+            kept.add(split)
+            spans.extend(((left, split), (split, right)))
+    return [records[index] for index in sorted(kept)]
+
+
 class TeachRecorder(Worker):
     def __init__(self, shared, path):
         super().__init__(shared)
@@ -71,12 +128,13 @@ class TeachRecorder(Worker):
             offset = records[0]['time']
             for row in records:
                 row['time'] -= offset
+            keyframes = simplify_trajectory(records)
             self.path.parent.mkdir(parents=True, exist_ok=True)
             temp = self.path.with_suffix('.tmp')
-            temp.write_text(json.dumps(dict(format='roarm-studio-native-v1', records=records),
+            temp.write_text(json.dumps(dict(format='roarm-studio-native-v1', sample_count=len(records), records=keyframes),
                                        ensure_ascii=False), encoding='utf-8')
             temp.replace(self.path)
-            self.shared.event(f'示教轨迹已保存：{self.path}，{len(records)} 点')
+            self.shared.event(f'示教轨迹已保存：{self.path}，{len(records)} 个采样 → {len(keyframes)} 个关键点')
         except Exception as e:
             self.error = str(e)
             self.shared.event(f'示教录制：{e}')
