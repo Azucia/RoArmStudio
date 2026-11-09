@@ -2,13 +2,12 @@
 import json
 import math
 import time
-from pathlib import Path
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (QDialog, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout,
     QGridLayout, QLabel, QPushButton, QDoubleSpinBox, QSpinBox, QComboBox,
-    QLineEdit, QPlainTextEdit, QFileDialog, QMessageBox, QInputDialog, QApplication)
+    QLineEdit, QPlainTextEdit, QFileDialog, QMessageBox, QInputDialog, QApplication, QButtonGroup)
 from backend import KEYS, NAMES, all_command, pose_command
-from actions import TeachRecorder, Playback, load_trajectory
+from actions import TEACH_SLOTS, TeachRecorder, Playback, load_trajectory, save_trajectory
 from host_control import base_in_sector
 
 
@@ -18,7 +17,8 @@ class Controls(QDialog):
         self.owner = owner
         self.setWindowTitle('M3-Pro · 末端控制 / 示教 / 设备设置')
         self.resize(760, 750)
-        self.trajectory = None
+        self.teach_library = owner.teach_library
+        self.teach_slot = 1
         self.teach_record = None
         self.playback = None
         self.record_loaded = True
@@ -78,16 +78,37 @@ class Controls(QDialog):
 
     def make_actions(self):
         layout = self.page('示教与回放')
-        hint = QLabel('连续记录关节角度，保存时自动简化为关键点。')
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
-        row = QHBoxLayout()
-        self.record_btn = self.button(row, '开始录制', self.record_teach)
-        self.button(row, '释放 / 恢复扭矩', self.owner.teach)
-        layout.addLayout(row)
-        self.trajectory_label = QLabel('未载入轨迹')
+        grid = QGridLayout()
+        grid.setSpacing(4)
+        self.slot_group = QButtonGroup(self)
+        self.slot_buttons = {}
+        for slot in TEACH_SLOTS:
+            button = QPushButton(f'示教{slot}')
+            button.setObjectName('teachSlot')
+            button.setCheckable(True)
+            self.slot_group.addButton(button, slot)
+            self.slot_buttons[slot] = button
+            grid.addWidget(button, (slot - 1) // 4, (slot - 1) % 4)
+        self.slot_buttons[self.teach_slot].setChecked(True)
+        self.slot_group.idClicked.connect(self.select_teach_slot)
+        layout.addLayout(grid)
+        self.trajectory_label = QLabel()
         self.trajectory_label.setWordWrap(True)
         layout.addWidget(self.trajectory_label)
+        row = QHBoxLayout()
+        self.record_btn = self.button(row, '开始录制', self.record_teach)
+        self.record_btn.setToolTip('停止录制后，自动将关键点保存到选中的槽位。')
+        self.button(row, '释放 / 恢复扭矩', self.owner.teach)
+        layout.addLayout(row)
+        row = QHBoxLayout()
+        row.addWidget(QLabel('回放倍率'))
+        self.factor = self.spin(.1, 999., .5, ' ×')
+        self.factor.setSingleStep(.1)
+        row.addWidget(self.factor)
+        self.play_btn = self.button(row, '开始回放', self.play)
+        layout.addLayout(row)
+        self.play_state = QLabel('未开始')
+        layout.addWidget(self.play_state)
         row = QHBoxLayout()
         self.import_format = QComboBox()
         self.import_format.addItems(['Studio 原生角度轨迹', '官方 SDK 轨迹（夹爪已反转）'])
@@ -95,22 +116,17 @@ class Controls(QDialog):
         self.import_format.setMinimumContentsLength(12)
         self.import_format.setMaximumWidth(230)
         row.addWidget(self.import_format, 1)
-        self.button(row, '载入轨迹', self.load)
+        self.import_btn = self.button(row, '导入本槽', self.load)
         layout.addLayout(row)
-        row = QHBoxLayout()
-        row.addWidget(QLabel('回放倍率'))
-        self.factor = self.spin(.1, 999., .5, ' ×')
-        self.factor.setSingleStep(.1)
-        row.addWidget(self.factor)
-        self.button(row, '开始回放', self.play, True)
-        layout.addLayout(row)
-        self.play_state = QLabel('未开始')
-        layout.addWidget(self.play_state)
         text = QLabel('倍率调整轨迹时间，实际速度受关节上限和跟随误差约束。\n请先结束手动示教并托稳机械臂。')
         text.setWordWrap(True)
         layout.addWidget(text)
-        self.button(layout, '取消后续动作 / 回放', self.owner.hold).setObjectName('stop')
+        row = QHBoxLayout()
+        self.button(row, '取消后续动作 / 回放', self.owner.hold).setObjectName('stop')
+        self.clear_btn = self.button(row, '清空本槽', self.clear_teach_slot)
+        layout.addLayout(row)
         layout.addStretch()
+        self.refresh_teach_slots()
 
     def make_device_simple(self):
         layout = QVBoxLayout(self.device_page)
@@ -145,26 +161,75 @@ class Controls(QDialog):
         if not self.owner.fresh() or self.owner.arm.playing:
             self.owner.error('需要正常关节反馈，且没有正在执行的回放。')
             return
-        path = self.owner.destination('teach').with_suffix('.json')
-        self.teach_record = self.owner.start_worker(TeachRecorder(self.owner.shared, path))
-        self.record_loaded = False
-        self.trajectory_label.setText(f'录制位置：{path}')
+        if not self.confirm_replace_slot():
+            return
+        arm = self.owner.arm
+        if arm is None:
+            self.owner.error('机械臂已断开。')
+            return
+        with arm.command_lock:
+            if self.owner.fresh() and self.owner.arm is arm and not arm.playing:
+                path = self.teach_library.path(self.teach_slot)
+                self.teach_record = self.owner.start_worker(TeachRecorder(self.owner.shared, path))
+                self.record_loaded = False
+                self.trajectory_label.setText(f'示教{self.teach_slot} · 正在录制')
+                return
+        self.owner.error('设备状态已变化，请重试。')
+
+    def select_teach_slot(self, slot):
+        if not self.record_loaded:
+            self.slot_buttons[self.teach_slot].setChecked(True)
+            return
+        self.teach_slot = slot
+        self.refresh_teach_slots()
+
+    def refresh_teach_slots(self, sample_count=None):
+        for item in self.teach_library.slots():
+            button = self.slot_buttons[item['slot']]
+            button.setText(item['name'] + (' •' if item['occupied'] else ''))
+            button.setToolTip('已有轨迹' if item['occupied'] else '空槽位')
+        name = f'示教{self.teach_slot}'
+        try:
+            records = self.teach_library.load(self.teach_slot)
+            count = f'{sample_count} 个采样 → ' if sample_count is not None else ''
+            self.trajectory_label.setText(f'{name} · {count}{len(records)} 个关键点 · {records[-1]["time"]:.1f} 秒')
+        except FileNotFoundError:
+            self.trajectory_label.setText(f'{name} · 空槽位')
+        except (OSError, ValueError, TypeError, KeyError, OverflowError):
+            self.trajectory_label.setText(f'{name} · 轨迹文件无法读取')
+
+    def confirm_replace_slot(self):
+        return (not self.teach_library.path(self.teach_slot).is_file()
+                or QMessageBox.question(self.owner, '替换示教',
+                    f'保存成功后将替换示教{self.teach_slot}。继续？') == QMessageBox.Yes)
+
+    def slot_busy(self):
+        return not self.record_loaded or bool(self.owner.arm and self.owner.arm.playing)
 
     def load(self):
+        if self.slot_busy():
+            return
         path, _ = QFileDialog.getOpenFileName(self.owner, '载入关节轨迹', str(self.owner.folder), 'JSON (*.json)')
-        if not path:
+        if not path or not self.confirm_replace_slot() or self.slot_busy():
             return
         try:
-            self.trajectory = load_trajectory(path, self.import_format.currentIndex() == 1)
-            self.trajectory_label.setText(f'{Path(path).name} · {len(self.trajectory)} 点 · {self.trajectory[-1]["time"]:.1f} 秒')
+            records = load_trajectory(path, self.import_format.currentIndex() == 1)
+            save_trajectory(self.teach_library.path(self.teach_slot), records)
+            self.refresh_teach_slots()
         except Exception as e:
-            self.trajectory = None
             self.owner.error(e)
 
-    def play(self):
-        if not self.trajectory:
-            self.owner.error('请先载入有效轨迹')
+    def clear_teach_slot(self):
+        if self.slot_busy() or QMessageBox.question(self.owner, '清空示教',
+                f'清空示教{self.teach_slot}的轨迹？') != QMessageBox.Yes or self.slot_busy():
             return
+        try:
+            self.teach_library.path(self.teach_slot).unlink(missing_ok=True)
+            self.refresh_teach_slots()
+        except OSError as error:
+            self.owner.error(error)
+
+    def play(self):
         if self.teach_record and self.teach_record.is_alive():
             self.owner.error('请先停止轨迹录制')
             return
@@ -174,9 +239,12 @@ class Controls(QDialog):
             return
         if QMessageBox.question(self.owner, '开始回放', '机械臂将先移动到轨迹首帧，然后执行整段动作。确认工作空间已清空？') != QMessageBox.Yes:
             return
-        self.playback = self.owner.start_worker(Playback(self.owner.shared, self.owner.arm,
-                                                       self.trajectory, self.factor.value(),
-                                                       self.owner.speed.value(), self.owner.acc.value()))
+        try:
+            records = self.teach_library.load(self.teach_slot)
+            self.playback = self.owner.start_worker(Playback(self.owner.shared, self.owner.arm,
+                records, self.factor.value(), self.owner.speed.value(), self.owner.acc.value()))
+        except (OSError, ValueError, TypeError, KeyError, OverflowError) as error:
+            self.owner.error(error)
 
     def stop_playback(self):
         self.owner.hold()
@@ -217,17 +285,26 @@ class Controls(QDialog):
             self.device_feedback.setText('未连接 / 反馈已过期')
         recording = self.teach_record and self.teach_record.is_alive()
         saving = recording and self.teach_record.stop.is_set()
-        self.record_btn.setEnabled(not saving)
+        occupied = self.teach_library.path(self.teach_slot).is_file()
+        self.play_btn.setEnabled(inside and not playing and not teaching and occupied and not recording)
+        self.record_btn.setEnabled(not saving and not playing)
+        self.import_btn.setEnabled(not recording and not playing)
+        self.clear_btn.setEnabled(occupied and not recording and not playing)
+        for button in self.slot_buttons.values():
+            button.setEnabled(not recording)
         self.record_btn.setText('正在保存关键点…' if saving else
                                 f'停止并保存 · {self.teach_record.count} 个采样' if recording else '开始录制')
         if self.teach_record and not self.teach_record.is_alive() and not self.record_loaded:
             self.record_loaded = True
-            if self.teach_record.error is None and self.teach_record.path.exists():
-                try:
-                    self.trajectory = load_trajectory(self.teach_record.path)
-                    self.trajectory_label.setText(f'已保存并载入：{self.teach_record.count} 个采样 → {len(self.trajectory)} 个关键点\n结束手动示教后可回放。')
-                except Exception as e:
-                    self.owner.note(f'录制文件载入失败：{e}')
-        if self.playback:
+            count = self.teach_record.count if self.teach_record.error is None else None
+            self.refresh_teach_slots(count)
+        external = self.owner.external_api.teach_status()
+        if external is not None and self.owner.external_api.lease:
+            status = {'queued': '待执行', 'sent': '执行中', 'reached': '已完成',
+                      'degraded_reached': '降标完成', 'cancelled': '已取消', 'failed': '失败'}
+            self.play_state.setText(f'外部{external["name"]} · {external["progress"]:.0%} · {status.get(external["state"], external["state"])}')
+        elif self.playback:
             self.play_state.setText(f'回放进度 {self.playback.progress:.0%}'+(' · 执行中' if self.playback.is_alive() else ' · '+(self.playback.error or '已结束')))
+        else:
+            self.play_state.setText('未开始')
 

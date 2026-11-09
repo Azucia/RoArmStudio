@@ -3,9 +3,10 @@ import math
 import xml.etree.ElementTree as ET
 
 import numpy as np
-from PySide6.QtCore import QPointF, Qt
+from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import QWidget
+from host_control import forward
 
 
 GRID_STEP = 75
@@ -40,7 +41,7 @@ class ArmGeometry:
         with np.load(directory / 'geometry.npz', allow_pickle=False) as archive:
             self.meshes = {link: archive[link] for link in archive.files}
 
-    def posed_meshes(self, values):
+    def link_frames(self, values):
         # ROS joints 1–5 share the firmware convention. The SDK inverts the
         # direct gripper between ROS and the firmware. Apply it only in this view.
         angles = iter((*values[:5], math.pi - values[5]))
@@ -51,6 +52,10 @@ class ArmGeometry:
             if revolute:
                 rotation = rotation @ rotate_z(next(angles))
             frames[child] = rotation, position + basis @ offset
+        return frames
+
+    def posed_meshes(self, values):
+        frames = self.link_frames(values)
         return np.concatenate([mesh @ frames[name][0].T + frames[name][1]
                                for name, mesh in self.meshes.items()])
 
@@ -85,6 +90,8 @@ class ArmView(QWidget):
         self.bounds = self.frame_min, self.frame_max
         self.angles = None
         self.triangles = None
+        self.teach_angles = None
+        self.teach_target = None
         self.message = '等待机械臂反馈'
         self.shades = [QColor(58+6*i, 68+6*i, 79+6*i) for i in range(24)]
         try:
@@ -109,6 +116,42 @@ class ArmView(QWidget):
             self.bounds = (np.minimum(self.frame_min, vertices.min(axis=(0, 1))),
                            np.maximum(self.frame_max, vertices.max(axis=(0, 1))))
         self.update()
+
+    def set_teach_target(self, angles):
+        if self.teach_angles == angles or self.geometry is None:
+            return
+        self.teach_angles = angles
+        self.teach_target = None
+        if angles is not None:
+            _, position = self.geometry.link_frames(angles)['hand_tcp']
+            x, y, z = forward(angles)[:3]
+            self.teach_target = position, f'X {x:.1f}   Y {y:.1f}   Z {z:.1f}'
+        self.update()
+
+    def draw_teach_target(self, painter, tip, text):
+        if not QRectF(self.rect()).contains(tip):
+            return
+        metrics = painter.fontMetrics()
+        text_width = metrics.horizontalAdvance(text)
+        side = 1 if tip.x() + 46 + text_width < self.width() else -1
+        vertical = -1 if tip.y() >= 44 else 1
+        offset = QPointF(34 * side, 28 * vertical)
+        tail = tip + offset
+        base = tip + offset * .26
+        wing = QPointF(-offset.y(), offset.x()) * .11
+        color = QColor('#ff4c54')
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(QPen(color, 2.5))
+        painter.drawLine(tail, base)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(color)
+        painter.drawPolygon(QPolygonF([tip, base + wing, base - wing]))
+        x = tail.x() + (7 if side > 0 else -7 - text_width)
+        x = max(4, min(x, self.width() - text_width - 4))
+        y = tail.y() + (metrics.ascent() - metrics.descent()) / 2
+        y = max(metrics.ascent() + 4, min(y, self.height() - metrics.descent() - 4))
+        painter.setPen(color)
+        painter.drawText(QPointF(x, y), text)
 
     def wheelEvent(self, event):
         steps = event.angleDelta().y() / 120 or event.pixelDelta().y() / 60
@@ -208,3 +251,6 @@ class ArmView(QWidget):
             painter.setPen(QPen(color, 0))
             painter.setBrush(color)
             painter.drawPolygon(QPolygonF([QPointF(x, y) for x, y in pixels[index]]))
+        if self.teach_target is not None:
+            position, text = self.teach_target
+            self.draw_teach_target(painter, point(position), text)

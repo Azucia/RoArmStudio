@@ -10,9 +10,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import cv2
 
+from actions import Playback, TEACH_SLOTS
 from backend import FEEDBACK_TIMEOUT, KEYS, all_command, depth_views, joint_command
 from backend import torque_disabled
-from host_control import base_in_sector, forward
+from host_control import XYZ_DEGRADED_MM, base_in_sector, forward
 from host_direct import holding_offset, plan_xyz
 
 
@@ -28,8 +29,10 @@ class APIError(Exception):
 
 
 class DeviceAPI:
-    def __init__(self, shared, get_arm):
+    def __init__(self, shared, get_arm, teach_library=None, is_recording=lambda: False):
         self.shared, self.get_arm = shared, get_arm
+        self.teach_library = teach_library
+        self.is_recording = is_recording
         self.lock = threading.RLock()
         self.image_lock = threading.Lock()
         self.images = {}
@@ -39,6 +42,8 @@ class DeviceAPI:
         self.lease = None
         self.actions = {}
         self.active = None
+        self.teach_action = None
+        self.teach_result = None
         self.intent = None
         self.execution_detail = ''
 
@@ -76,6 +81,12 @@ class DeviceAPI:
             self.lease = None
         if self.active is not None:
             self.finish(state, reason)
+        if self.teach_action is not None:
+            result, worker = self.teach_action
+            worker.stop.set()
+            result.update(state=state, serial_written=worker.any_serial_write,
+                          progress=worker.progress, degraded=worker.degraded, message=reason)
+            self.teach_action = None
         self.intent = None
         self.execution_detail = ''
 
@@ -86,6 +97,7 @@ class DeviceAPI:
 
     def poll(self):
         with self.lock:
+            self.poll_teach()
             if self.lease is None:
                 return
             _, arm, epoch = self.lease
@@ -114,6 +126,34 @@ class DeviceAPI:
                     return
             if now >= deadline:
                 self.release('timed_out', '动作超时，已取消待发指令')
+
+    def poll_teach(self):
+        if self.teach_action is None:
+            return
+        result, worker = self.teach_action
+        result.update(progress=worker.progress, degraded=worker.degraded,
+                      serial_written=worker.any_serial_write)
+        self.execution_detail = (f'外部示教回放到位检查：末端偏差 {worker.xyz_error_mm:.1f} mm'
+                                 if worker.degraded else '')
+        if worker.is_alive():
+            result['state'] = 'sent' if result['serial_written'] else 'queued'
+            return
+        if worker.error:
+            result.update(state='failed', message=worker.error)
+        elif worker.cancelled:
+            result.update(state='cancelled', message='回放已停止')
+        else:
+            result['state'] = 'degraded_reached' if worker.degraded else 'reached'
+        self.teach_action = None
+
+    def teach_status(self):
+        with self.lock:
+            return self.teach_result.copy() if self.teach_result is not None else None
+
+    def teach_target_angles(self):
+        with self.lock:
+            if self.teach_action is not None:
+                return self.teach_action[1].target_angles
 
     @staticmethod
     def xyz_feedback(pose):
@@ -149,6 +189,8 @@ class DeviceAPI:
         if not arm or not arm.connected or arm.stop.is_set():
             raise APIError(409, 'arm_offline', '机械臂未连接')
         with arm.command_lock:
+            if self.is_recording():
+                raise APIError(409, 'arm_busy', '请先结束示教录制')
             pose, stamp, _ = self.telemetry()
             if (not pose or time.monotonic() - stamp > FEEDBACK_TIMEOUT
                     or not base_in_sector(pose.get('b'), feedback=True)
@@ -166,6 +208,7 @@ class DeviceAPI:
             key = secrets.token_urlsafe(24)
             self.lease = key, arm, epoch
         self.actions.clear()
+        self.teach_result = None
         return {'lease': key, 'ttl_s': LEASE_SECONDS}
 
     def require_lease(self, key):
@@ -191,15 +234,51 @@ class DeviceAPI:
             return result.copy()
         if len(self.actions) >= 4096:
             raise APIError(409, 'lease_full', '请释放并重新取得控制权')
-        if self.active is not None:
+        if self.active is not None or self.teach_action is not None:
             raise APIError(409, 'action_busy', '等待当前动作结束或取消')
 
+        teach = self.load_teach(body) if body.get('kind') == 'play_teach' else None
         with arm.command_lock:
             pose, stamp, _ = self.telemetry()
             if (arm.epoch != epoch or not pose or time.monotonic() - stamp > FEEDBACK_TIMEOUT
                     or any(pose.get('torswitch'+k) != 1 for k in ('B','S','E','T','R','G'))):
                 raise APIError(409, 'arm_not_ready', '机械臂反馈或扭矩已失效')
+            if teach is not None:
+                return self.start_teach(body, action_id, arm, epoch, *teach)
             return self.submit_action(body, action_id, arm, epoch, pose)
+
+    def load_teach(self, body):
+        slot = body.get('slot')
+        if isinstance(slot, str) and slot.startswith('示教'):
+            slot = next((n for n in TEACH_SLOTS if slot == f'示教{n}'), None)
+        factor = body.get('factor', 1.)
+        if type(slot) is not int or slot not in TEACH_SLOTS:
+            raise APIError(400, 'invalid_slot', '请选择示教1–示教12')
+        if type(factor) not in (int, float) or not .1 <= factor <= 999:
+            raise APIError(400, 'invalid_factor', '回放倍率必须在 0.1–999 之间')
+        if self.teach_library is None:
+            raise APIError(404, 'teach_empty', '示教槽位为空')
+        try:
+            records = self.teach_library.load(slot)
+        except FileNotFoundError as error:
+            raise APIError(404, 'teach_empty', f'示教{slot}为空') from error
+        except (ValueError, TypeError, KeyError, OverflowError, OSError) as error:
+            raise APIError(422, 'invalid_trajectory', str(error)) from error
+        return slot, factor, records
+
+    def start_teach(self, body, action_id, arm, epoch, slot, factor, records):
+        speed, acc, *_ = self.profile
+        worker = Playback(self.shared, arm, records, factor, speed, acc, external_token=epoch)
+        result = {'id': action_id, 'state': 'queued', 'slot': slot, 'name': f'示教{slot}',
+                  'progress': 0., 'degraded': False, 'serial_written': False, 'message': None}
+        worker.start()
+        self.intent = None
+        self.execution_detail = ''
+        self.teach_result = result
+        self.teach_action = result, worker
+        self.actions[action_id] = body, result
+        self.shared.event(f'对外连接：开始回放示教{slot}')
+        return result.copy()
 
     def submit_action(self, body, action_id, arm, epoch, pose):
         kind = body.get('kind')
@@ -259,10 +338,12 @@ class DeviceAPI:
                   'planned_pitch_deg': math.degrees(planned[3]) if planned else None,
                   'message': detail or None}
         self.intent = intent
-        self.execution_detail = detail
+        self.teach_result = None
+        miss = math.dist(values[:3], accepted[:3]) if accepted is not None else 0.
+        self.execution_detail = f'预计末端偏差 {miss:.1f} mm。{detail}' if miss > XYZ_DEGRADED_MM else ''
         self.actions[action_id] = body, result
         self.active = result, receipt, targets, result['accepted_xyz_mm'], time.monotonic() + ACTION_SECONDS
-        self.shared.event(f'对外连接：{kind} 已提交' + (f' · 降标执行 · {detail}' if detail else ''))
+        self.shared.event(f'对外连接：{kind} 已提交' + (f' · {self.execution_detail or detail}' if detail else ''))
         return result.copy()
 
     def command(self, method, path, body, key, server):
@@ -272,6 +353,8 @@ class DeviceAPI:
             self.poll()
             if method == 'GET' and path == '/v1/status':
                 return self.status()
+            if method == 'GET' and path == '/v1/teach':
+                return self.teach_library.slots() if self.teach_library is not None else []
             if method == 'POST' and path == '/v1/lease':
                 return self.acquire()
             if method == 'POST' and path == '/v1/lease/renew':

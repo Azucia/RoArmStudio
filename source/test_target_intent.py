@@ -67,6 +67,13 @@ class Tests(unittest.TestCase):
         pad.send_xyz([x, y, z, 0, 0, 180], [0, 0, 180])
         w.tick()
         self.assertEqual(pad.execution_mode.objectName(), 'strictMode')
+        goal = [x, y, z, 0, 0, 180]
+        for vertical_miss, expected in ((0., 'strictMode'), (1., 'degradedMode')):
+            accepted = [x - 6, y + 8, z - vertical_miss, 15, 0, 180]
+            with patch('jogpad.plan_xyz', return_value=(all_command(home), home, accepted, '俯仰调整')):
+                pad.send_xyz(goal, goal[3:])
+            w.tick()
+            self.assertEqual(pad.execution_mode.objectName(), expected)
         self.assertEqual(errors, [])
 
 if __name__=='__main__':unittest.main()

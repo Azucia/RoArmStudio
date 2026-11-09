@@ -1,4 +1,4 @@
-# RoarmStudio 2.1
+# RoarmStudio 2.4
 
 RoarmStudio 是为 RoArm-M3-Pro 开发的 Windows 桌面工作台。**在V1.0版本以后，有关XYZ的逆运动学全部在软件端计算。** 用户给出目标XYZ，软件端将**需要到达的坐标**换算成机械臂的六个关节角，通过 USB 串口直接发一条 JSON 指令（`T=102`）。机械臂通过 `T=105` 回报关节角和模型坐标。这条控制路径无需刷写固件。
 
@@ -6,14 +6,14 @@ RoarmStudio 是为 RoArm-M3-Pro 开发的 Windows 桌面工作台。**在V1.0版
 
 在 RoArmStudio 顶部打开「设备/连接」，连接机械臂和两台相机。点击「启动接口」和「复制连接信息」。Studio 提供两个固定画面名称，`hand` 是手部彩色，`workspace` 是彩色深度融合。
 
-安装包、便携版和 SDK 位于 [v2.1 发布页](https://github.com/Azucia/RoArmStudio/releases/tag/v2.1)，SDK 源码位于 [sdk](sdk)。接口仅监听 `127.0.0.1`，每次启动都会生成新的连接密钥。
+安装包、便携版和 SDK 位于 [v2.4 发布页](https://github.com/Azucia/RoArmStudio/releases/tag/v2.4)，SDK 源码位于 [sdk](sdk)。接口仅监听 `127.0.0.1`，每次启动都会生成新的连接密钥。
 
 ### 复制运行 · Python
 
 先在 Windows PowerShell 执行以下命令。第二行把刚才从 Studio 复制的连接信息保存到当前目录。
 
 ```powershell
-py -m pip install "https://github.com/Azucia/RoArmStudio/releases/download/v2.1/roarmstudio_sdk-2.1.0-py3-none-any.whl"
+py -m pip install "https://github.com/Azucia/RoArmStudio/releases/download/v2.4/roarmstudio_sdk-2.4.0-py3-none-any.whl"
 Get-Clipboard -Raw | Set-Content -Encoding utf8 studio-connection.json
 ```
 
@@ -52,6 +52,24 @@ with Studio.from_connection(Path("studio-connection.json").read_text(encoding="u
 ```
 
 `status()` 可随时查询设备，`action(id)` 查询单次动作。离开 `with` 时自动调用 `release()`。需要主动取消时调用 `cancel_pending()`。调用方自己轮询时可用 `renew()` 续期，`wait()` 会自动续期。接口拒绝时抛出 `SDKError`，可读取 `code` 和 `status`。
+
+### 按名称回放示教
+
+在「示教」页选中「示教1」至「示教12」，录制停止后会自动保存到所选槽位。已有的轨迹文件可导入。回放会先移动到所选轨迹的起点。
+
+```python
+from pathlib import Path
+from roarmstudio_sdk import Studio
+
+with Studio.from_connection(Path("studio-connection.json").read_text(encoding="utf-8-sig")) as studio:
+    print(studio.teach_slots())
+    studio.acquire()
+    action = studio.play_teach("示教1", factor=1.0)
+    result = studio.wait(action["id"], timeout=300)
+    print(result["state"])
+```
+
+同一控制权可以连续回放多条轨迹。等上一条返回 `reached` 或 `degraded_reached` 后再提交下一条。也可以用数字 `1` 至 `12` 指定槽位。
 
 ### 复制运行 · HTTP
 
@@ -111,6 +129,7 @@ try {
 | GET `/v1/cameras/hand/stream.mjpg` | 手部 MJPEG，帧各自带时间戳。 |
 | GET `/v1/cameras/workspace/stream.mjpg` | 彩色深度融合 MJPEG，帧各自带时间戳。 |
 | GET `/v1/cameras/workspace/depth.png` | 与工作区彩色像素对齐的 16 位深度 PNG。像素值乘以 `X-Depth-Scale-Mm` 得到毫米。 |
+| GET `/v1/teach` | 列出 12 个槽位及其 `slot`、`name` 和 `occupied`。 |
 | POST `/v1/lease` | 返回 `lease` 和 `ttl_s`。一次一个外部控制方。 |
 | POST `/v1/lease/renew` | 控制权。续期 15 秒。Python `wait()` 自动续期。 |
 | POST `/v1/lease/release` | 控制权。取消待发动作并释放控制权。 |
@@ -130,8 +149,9 @@ try {
 | `jog_xyz` | `xyz_mm: [dx,dy,dz]`，毫米增量。可选 `allow_degraded`，默认 false。 |
 | `home` | 可选 `direction` 为 `forward` 或 `down`，省略时使用界面设置。 |
 | `grip` | `closed: true` 收紧，`false` 打开。 |
+| `play_teach` | `slot` 为 `"示教1"` 至 `"示教12"` 或对应数字。可选 `factor` 为 0.1 至 999，默认 1。 |
 
-结果包含 `id`、`state`、`serial_written`、`degraded`、`accepted_xyz_mm`、`planned_xyz_mm`、`planned_pitch_deg` 和 `message`。状态为 `queued`、`sent`、`reached`、`degraded_reached`、`cancelled`、`failed` 或 `timed_out`。XYZ 到位以新反馈确认，位置容差为 3 mm，并检查关节跟随。动作超时为 30 秒。动作结果保留到下一次取得控制权或停止接口。控制权到期、界面取消、反馈过期或扭矩状态异常都会阻止后续发送。
+结果包含 `id`、`state`、`serial_written`、`degraded`、`accepted_xyz_mm`、`planned_xyz_mm`、`planned_pitch_deg` 和 `message`。状态为 `queued`、`sent`、`reached`、`degraded_reached`、`cancelled`、`failed` 或 `timed_out`。XYZ 到位以新反馈确认，位置容差为 3 mm，并检查关节跟随。普通动作超时为 30 秒。示教回放返回槽位编号、名称和 `progress`（0 至 1），回放期间需要持续续期。动作结果保留到下一次取得控制权或停止接口。控制权到期、界面取消、反馈过期或扭矩状态异常都会阻止后续发送。
 
 错误以 JSON 返回 `error` 和 `message`。常见错误为 `unauthorized`（401）、`control_busy`、`action_busy`、`invalid_lease`（409）、`motion_rejected`（422）、`camera_offline`（503）。画面时间戳来自主机，两路画面分别更新。
 
@@ -205,4 +225,13 @@ By Azucia
 - 示教页显示原始采样数与保存后的关键点数。已有轨迹可直接载入。
 
 [下载 v2.1 安装包、便携版与 Python SDK](https://github.com/Azucia/RoArmStudio/releases/tag/v2.1)
+
+## v2.4 更新
+
+- 示教页提供 12 个固定槽位。录制完成后自动保存，已保存的轨迹可直接查看、回放或从旧文件导入。
+- 外部程序可用 `studio.teach_slots()` 查看槽位，用 `studio.play_teach("示教1")` 回放指定轨迹。
+- 示教回放时，机械臂预览用红色箭头和 XYZ 数值显示当前目标。
+- 末端位置偏差超过 10 mm 时显示「降标执行」。示教以到位反馈判断，电脑逆解以请求位置和接受位置的距离判断。
+
+[下载 v2.4 安装包、便携版与 Python SDK](https://github.com/Azucia/RoArmStudio/releases/tag/v2.4)
 

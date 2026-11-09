@@ -4,6 +4,7 @@ import math
 KEYS=('b','s','e','t','r','g')
 BASE_LIMIT_DEG = 105
 BASE_LIMIT_RAD = math.radians(BASE_LIMIT_DEG)
+XYZ_DEGRADED_MM = 10.0
 L2=math.hypot(236.82,30.0)
 T2=math.atan2(30.0,236.82)
 L3=144.49
