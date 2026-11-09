@@ -78,7 +78,7 @@ class Controls(QDialog):
 
     def make_actions(self):
         layout = self.page('示教与回放')
-        hint = QLabel('录制关节角度，或载入已保存的轨迹。')
+        hint = QLabel('连续记录关节角度，保存时自动简化为关键点。')
         hint.setWordWrap(True)
         layout.addWidget(hint)
         row = QHBoxLayout()
@@ -215,13 +215,17 @@ class Controls(QDialog):
             self.device_feedback.setText('\n'.join(lines))
         else:
             self.device_feedback.setText('未连接 / 反馈已过期')
-        self.record_btn.setText(f'停止并保存 · {self.teach_record.count} 点' if self.teach_record and self.teach_record.is_alive() else '开始录制')
+        recording = self.teach_record and self.teach_record.is_alive()
+        saving = recording and self.teach_record.stop.is_set()
+        self.record_btn.setEnabled(not saving)
+        self.record_btn.setText('正在保存关键点…' if saving else
+                                f'停止并保存 · {self.teach_record.count} 个采样' if recording else '开始录制')
         if self.teach_record and not self.teach_record.is_alive() and not self.record_loaded:
             self.record_loaded = True
             if self.teach_record.error is None and self.teach_record.path.exists():
                 try:
                     self.trajectory = load_trajectory(self.teach_record.path)
-                    self.trajectory_label.setText(f'已保存并载入：{self.teach_record.path.name} · {len(self.trajectory)} 点；结束手动示教后可直接回放')
+                    self.trajectory_label.setText(f'已保存并载入：{self.teach_record.count} 个采样 → {len(self.trajectory)} 个关键点\n结束手动示教后可回放。')
                 except Exception as e:
                     self.owner.note(f'录制文件载入失败：{e}')
         if self.playback:

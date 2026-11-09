@@ -1,4 +1,4 @@
-# RoarmStudio 2.0
+# RoarmStudio 2.1
 
 RoarmStudio 是为 RoArm-M3-Pro 开发的 Windows 桌面工作台。**在V1.0版本以后，有关XYZ的逆运动学全部在软件端计算。** 用户给出目标XYZ，软件端将**需要到达的坐标**换算成机械臂的六个关节角，通过 USB 串口直接发一条 JSON 指令（`T=102`）。机械臂通过 `T=105` 回报关节角和模型坐标。这条控制路径无需刷写固件。
 
@@ -6,14 +6,14 @@ RoarmStudio 是为 RoArm-M3-Pro 开发的 Windows 桌面工作台。**在V1.0版
 
 在 RoArmStudio 顶部打开「设备/连接」，连接机械臂和两台相机。点击「启动接口」和「复制连接信息」。Studio 提供两个固定画面名称，`hand` 是手部彩色，`workspace` 是彩色深度融合。
 
-安装包、便携版和 SDK 位于 [v2.0 发布页](https://github.com/Azucia/RoArmStudio/releases/tag/v2.0)，SDK 源码位于 [sdk](sdk)。接口仅监听 `127.0.0.1`，每次启动都会生成新的连接密钥。
+安装包、便携版和 SDK 位于 [v2.1 发布页](https://github.com/Azucia/RoArmStudio/releases/tag/v2.1)，SDK 源码位于 [sdk](sdk)。接口仅监听 `127.0.0.1`，每次启动都会生成新的连接密钥。
 
 ### 复制运行 · Python
 
 先在 Windows PowerShell 执行以下命令。第二行把刚才从 Studio 复制的连接信息保存到当前目录。
 
 ```powershell
-py -m pip install "https://github.com/Azucia/RoArmStudio/releases/download/v2.0/roarmstudio_sdk-2.0.0-py3-none-any.whl"
+py -m pip install "https://github.com/Azucia/RoArmStudio/releases/download/v2.1/roarmstudio_sdk-2.1.0-py3-none-any.whl"
 Get-Clipboard -Raw | Set-Content -Encoding utf8 studio-connection.json
 ```
 
@@ -198,4 +198,11 @@ By Azucia
 - 新增前方 210° 软件限位。回放可显示「严格执行」或「降标执行」。红色「急停」可取消待发动作和回放，已发送的目标可能继续执行。
 
 [下载 v1.2 Windows x64 安装包与便携版](https://github.com/Azucia/RoArmStudio/releases/tag/v1.2)
+
+## v2.1 更新
+
+- 示教录制保存时自动合并可按原时间插值还原的中间点，保留起止点、停顿、明显转折和夹爪动作。
+- 示教页显示原始采样数与保存后的关键点数。已有轨迹可直接载入。
+
+[下载 v2.1 安装包、便携版与 Python SDK](https://github.com/Azucia/RoArmStudio/releases/tag/v2.1)
 
