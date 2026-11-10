@@ -1,4 +1,4 @@
-# RoarmStudio 2.4
+# RoarmStudio 2.5.4
 
 RoarmStudio 是为 RoArm-M3-Pro 开发的 Windows 桌面工作台。**在V1.0版本以后，有关XYZ的逆运动学全部在软件端计算。** 用户给出目标XYZ，软件端将**需要到达的坐标**换算成机械臂的六个关节角，通过 USB 串口直接发一条 JSON 指令（`T=102`）。机械臂通过 `T=105` 回报关节角和模型坐标。这条控制路径无需刷写固件。
 
@@ -6,14 +6,14 @@ RoarmStudio 是为 RoArm-M3-Pro 开发的 Windows 桌面工作台。**在V1.0版
 
 在 RoArmStudio 顶部打开「设备/连接」，连接机械臂和两台相机。点击「启动接口」和「复制连接信息」。Studio 提供两个固定画面名称，`hand` 是手部彩色，`workspace` 是彩色深度融合。
 
-安装包、便携版和 SDK 位于 [v2.4 发布页](https://github.com/Azucia/RoArmStudio/releases/tag/v2.4)，SDK 源码位于 [sdk](sdk)。接口仅监听 `127.0.0.1`，每次启动都会生成新的连接密钥。
+安装包、便携版和 SDK 位于 [v2.5.4 发布页](https://github.com/Azucia/RoArmStudio/releases/tag/v2.5.4)，SDK 源码位于 [sdk](sdk)。接口仅监听 `127.0.0.1`，每次启动都会生成新的连接密钥。
 
 ### 复制运行 · Python
 
 先在 Windows PowerShell 执行以下命令。第二行把刚才从 Studio 复制的连接信息保存到当前目录。
 
 ```powershell
-py -m pip install "https://github.com/Azucia/RoArmStudio/releases/download/v2.4/roarmstudio_sdk-2.4.0-py3-none-any.whl"
+py -m pip install "https://github.com/Azucia/RoArmStudio/releases/download/v2.5.4/roarmstudio_sdk-2.5.4-py3-none-any.whl"
 Get-Clipboard -Raw | Set-Content -Encoding utf8 studio-connection.json
 ```
 
@@ -193,7 +193,7 @@ py -m venv .venv
 .\.venv\Scripts\python.exe run.py
 ```
 
-打开「控制/连接」，连接机械臂并启用「电脑逆解」。让机械臂有空间安全回中，再开始 XYZ 点动。使用方法见[操作说明](使用说明.md)。
+打开「设备/连接」，连接机械臂并设置全局舵机限速。让机械臂有空间安全回中，再开始 XYZ 点动。使用方法见[操作说明](使用说明.md)。
 
 - **XYZ 和关节控制**：1 mm / 10 mm 点动、绝对坐标输入、关节角度控制、带载 Z 前馈。不可达目标会在发送前被拒绝。
 - **示教与回放**：保存关节轨迹、调整回放倍率，按实测到位情况推进。倍率改变计划时间，实际速度仍受关节速度限制。
@@ -231,7 +231,7 @@ By Azucia
 - 示教页提供 12 个固定槽位。录制完成后自动保存，已保存的轨迹可直接查看、回放或从旧文件导入。
 - 外部程序可用 `studio.teach_slots()` 查看槽位，用 `studio.play_teach("示教1")` 回放指定轨迹。
 - 示教回放时，机械臂预览用红色箭头和 XYZ 数值显示当前目标。
-- 末端位置偏差超过 10 mm 时显示「降标执行」。示教以到位反馈判断，电脑逆解以请求位置和接受位置的距离判断。
+- 电脑逆解接受的位置距请求超过 10 mm 时显示「降标执行」。示教回放根据编码器反馈判断终点是否停稳，估算末端偏差超过 10 mm 时报告未到位。
 
 [下载 v2.4 安装包、便携版与 Python SDK](https://github.com/Azucia/RoArmStudio/releases/tag/v2.4)
 

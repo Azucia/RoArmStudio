@@ -319,13 +319,13 @@ class DeviceAPI:
                 if direction not in ('forward', 'down'):
                     raise ValueError('direction 必须为 forward 或 down')
                 joints = [0, 0, math.pi/2, math.pi/2 if direction == 'down' else 0, 0, math.pi]
-                cmd = all_command(joints, 100, 5)
+                cmd = all_command(joints, min(100, speed), 5)
                 targets = dict(zip(KEYS, joints))
             elif kind == 'grip':
                 closed = body.get('closed')
                 if type(closed) is not bool:
                     raise ValueError('closed 需要布尔值')
-                cmd = joint_command(5, 180 if closed else math.degrees(1.08), 100)
+                cmd = joint_command(5, 180 if closed else math.degrees(1.08), min(100, speed))
                 targets = {'g': cmd['rad']}
             else:
                 raise ValueError('未知动作')

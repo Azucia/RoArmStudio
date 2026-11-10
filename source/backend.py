@@ -20,6 +20,7 @@ LIMITS = ((-BASE_LIMIT_DEG, BASE_LIMIT_DEG), (-90, 90), (0, 180), (-90, 90),
           (-180, 180), (math.degrees(1.08), 180))
 MOTION_TYPES = (101, 102, 1041)
 FEEDBACK_TIMEOUT = .6
+FEEDBACK_QUERY_RETRY = .25
 BASE_TARGET_ERROR = f'底座目标超出正前方 ±{BASE_LIMIT_DEG}°'
 BASE_FEEDBACK_ERROR = f'底座反馈超出正前方 ±{BASE_LIMIT_DEG}°，已禁止运动'
 TCP_TARGET_ERROR = f'末端目标超出正前方 ±{BASE_LIMIT_DEG}°'
@@ -303,6 +304,7 @@ class Arm(Worker):
                 return
             epoch = cmd.pop('_epoch', self.epoch)
             host_intent = cmd.pop('_host_intent', False)
+            teach_nominal = cmd.pop('_teach_nominal', None)
             receipt = cmd.pop('_receipt', None)
             rejected = None
             if epoch != self.epoch:
@@ -329,7 +331,8 @@ class Arm(Worker):
                     if receipt is not None:
                         receipt.finish(str(e))
                     raise
-                self.trace('serial_write', command=public_command(cmd), host_intent=host_intent)
+                trace_fields = {'teach_nominal': teach_nominal} if teach_nominal is not None else {}
+                self.trace('serial_write', command=public_command(cmd), host_intent=host_intent, **trace_fields)
                 if cmd.get('T') == 102:
                     self.last_joint_target = [cmd[k] for k in ALL_JOINT_FIELDS]
                 elif cmd.get('T') == 101 and self.last_joint_target is not None:
@@ -392,7 +395,7 @@ class Arm(Worker):
             buf = bytearray()
             while not self.stop.is_set():
                 self._write_pending(ser)
-                if time.monotonic()-last_query >= (2 if awaiting_feedback else .1):
+                if time.monotonic()-last_query >= (FEEDBACK_QUERY_RETRY if awaiting_feedback else .1):
                     ser.write(b'{"T":105}\n')
                     last_query = time.monotonic()
                     awaiting_feedback = True

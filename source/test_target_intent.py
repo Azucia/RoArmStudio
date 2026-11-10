@@ -27,7 +27,7 @@ class Tests(unittest.TestCase):
         w.arm.last_joint_target=q.copy()
         w.shared.pose=dict(T=1051,**dict(zip(('b','s','e','t','r','g'),q)),
                           x=xyz[0],y=xyz[1],z=xyz[2],tit=xyz[3])
-        w.shared.pose_time=time.monotonic();w.cartesian_pad.computer_mode.setChecked(True)
+        w.shared.pose_time=time.monotonic()
         try:
             with patch.object(w,'start_worker',side_effect=AssertionError('No trajectory worker')):
                 w.cartesian_pad.move(1,1)
@@ -56,7 +56,7 @@ class Tests(unittest.TestCase):
         w.shared.pose = dict(zip(('b','s','e','t','r','g'), home), T=1051, x=x, y=y, z=z, tit=pitch)
         w.shared.pose_time = time.monotonic()
         pad = w.cartesian_pad
-        pad.send_xyz([490, 0, 450, 0, 0, 180], [0, 0, 180])
+        pad.send_xyz([490, 0, 450, 0, 0, 180])
         w.tick()
         self.assertEqual(pad.execution_mode.objectName(), 'degradedMode')
         accepted = pad.target_intent.goal.copy()
@@ -64,14 +64,14 @@ class Tests(unittest.TestCase):
         pad.move(0, -1)
         self.assertEqual(len(w.arm.sent), 2)
         self.assertAlmostEqual(pad.target_intent.goal[0], accepted[0] - 1)
-        pad.send_xyz([x, y, z, 0, 0, 180], [0, 0, 180])
+        pad.send_xyz([x, y, z, 0, 0, 180])
         w.tick()
         self.assertEqual(pad.execution_mode.objectName(), 'strictMode')
         goal = [x, y, z, 0, 0, 180]
         for vertical_miss, expected in ((0., 'strictMode'), (1., 'degradedMode')):
             accepted = [x - 6, y + 8, z - vertical_miss, 15, 0, 180]
             with patch('jogpad.plan_xyz', return_value=(all_command(home), home, accepted, '俯仰调整')):
-                pad.send_xyz(goal, goal[3:])
+                pad.send_xyz(goal)
             w.tick()
             self.assertEqual(pad.execution_mode.objectName(), expected)
         self.assertEqual(errors, [])

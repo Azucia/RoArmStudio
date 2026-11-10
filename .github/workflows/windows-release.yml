@@ -71,7 +71,8 @@ jobs:
           python -m pip wheel --no-deps ./sdk -w dist
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           $wheel = Get-ChildItem dist/roarmstudio_sdk-*.whl
-          if ($wheel.Name -ne "roarmstudio_sdk-$env:STUDIO_VERSION.0-py3-none-any.whl") { throw 'SDK wheel version mismatch' }
+          python -c "import os, sys; from packaging.version import Version; from packaging.utils import parse_wheel_filename; name, version, *_ = parse_wheel_filename(sys.argv[1]); assert name == 'roarmstudio-sdk' and version == Version(os.environ['STUDIO_VERSION']), 'SDK wheel version mismatch'" $wheel.Name
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m pip install --no-deps $wheel.FullName
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           python -c "from roarmstudio_sdk import Studio; assert callable(Studio.from_connection)"

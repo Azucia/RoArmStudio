@@ -7,7 +7,8 @@ from PySide6.QtWidgets import QApplication
 from PySide6.QtTest import QTest
 from app import Window
 from jogpad import XYDisc
-from backend import pose_command
+from backend import ALL_JOINT_FIELDS, pose_command
+from host_control import forward
 
 APP = QApplication.instance() or QApplication([])
 
@@ -33,31 +34,16 @@ class DummyArm:
 
 
 class JogTests(unittest.TestCase):
-    def test_measured_gripper_over_limit_does_not_block_xyz(self):
-        w = Window()
-        w.cartesian_pad.computer_mode.setChecked(False)
-        errors=[]
-        w.error=lambda e: errors.append(str(e))
-        w.arm = DummyArm()
-        w.shared.pose = dict(T=1051, x=352.1467839, y=-2.160772722, z=212.3804383,
-                             tit=.027611654, b=-.006135923, s=.027611654,
-                             e=1.578466231, t=-.007669904, r=.001533981, g=3.149262558)
-        w.shared.pose_time = time.monotonic()
-        w.cartesian_pad.move(0, 1)
-        cmd = w.arm.sent[-1]
+    def test_legacy_pose_command_preserves_measured_gripper(self):
+        cmd = pose_command([353.1467839, -2.160772722, 212.3804383, math.degrees(.027611654),
+                            0, math.degrees(3.149262558)], [0, 0, math.degrees(3.149262558)])
         self.assertAlmostEqual(cmd['x'], 353.1467839)
         self.assertAlmostEqual(cmd['g'], 3.149262558)
         self.assertAlmostEqual(cmd['t'], .027611654)
-        w.cartesian_pad.switch_mode()
-        w.cartesian_pad.xyz_targets[2].setValue(213)
-        w.cartesian_pad.move_xyz()
-        self.assertAlmostEqual(w.arm.sent[-1]['g'], 3.149262558)
-        self.assertEqual(errors, [])
         with self.assertRaises(ValueError):
             pose_command([352, 0, 212, 0, 0, 181], [0, 0, 180.44])
         with self.assertRaises(ValueError):
             pose_command([901, 0, 212, 0, 0, 180.44], [0, 0, 180.44])
-        w.close()
 
     def test_gripper_buttons_only_command_joint_six_and_obey_state(self):
         w = Window()
@@ -114,9 +100,11 @@ class JogTests(unittest.TestCase):
 
     def test_keyboard_and_tabs_and_input_guard(self):
         w = Window()
-        w.cartesian_pad.computer_mode.setChecked(False)
         w.arm = DummyArm()
-        w.shared.pose = dict(T=1051, x=235, y=0, z=234, tit=0, b=0, s=0, e=1.57, t=0, r=0, g=1.08)
+        joints = [0, .1, 1.5, -.05, 0, 1.08]
+        x, y, z, pitch, _, _ = forward(joints)
+        w.arm.last_joint_target = joints
+        w.shared.pose = dict(T=1051, x=x, y=y, z=z, tit=pitch, **dict(zip('bsetrg', joints)))
         w.shared.pose_time = time.monotonic()
         w.show()
         w.isActiveWindow = lambda: True
@@ -128,9 +116,9 @@ class JogTests(unittest.TestCase):
         def key(k, modifier=Qt.NoModifier, repeat=False):
             return QKeyEvent(QEvent.KeyPress, k, modifier, '', repeat, 1)
         self.assertTrue(pad.eventFilter(w, key(Qt.Key_W)))
-        self.assertEqual(w.arm.sent[-1]['y'], 1)
+        self.assertAlmostEqual(forward([w.arm.sent[-1][k] for k in ALL_JOINT_FIELDS])[1], y + 1)
         pad.eventFilter(w, key(Qt.Key_D, Qt.ShiftModifier))
-        self.assertEqual(w.arm.sent[-1]['x'], 245)
+        self.assertAlmostEqual(forward([w.arm.sent[-1][k] for k in ALL_JOINT_FIELDS])[0], x + 10)
         self.assertEqual(pad.disc.pressed, (0, 10))
         count = len(w.arm.sent)
         pad.eventFilter(w, key(Qt.Key_D, repeat=True))
@@ -151,20 +139,24 @@ class JogTests(unittest.TestCase):
 
     def test_precise_xyz_keeps_orientation(self):
         w = Window()
-        w.cartesian_pad.computer_mode.setChecked(False)
         w.arm = DummyArm()
         w.shared.pose = dict(T=1051, x=235, y=1, z=234, tit=.2, b=0, s=0, e=1.57, t=0, r=.3, g=1.08)
         w.shared.pose_time = time.monotonic()
         pad = w.cartesian_pad
+        original_speed = w.speed.value()
+        self.addCleanup(w.speed.setValue, original_speed)
+        w.speed.setValue(200)
         pad.switch_mode()
         self.assertEqual(pad.xyz_targets[0].value(), 235)
         pad.xyz_targets[0].setValue(240)
         pad.move_xyz()
         command = w.arm.sent[-1]
-        self.assertEqual(command['x'], 240)
-        self.assertAlmostEqual(command['t'], .2)
-        self.assertAlmostEqual(command['r'], .3)
-        self.assertAlmostEqual(command['g'], 1.08)
+        self.assertEqual((command['T'], command['spd']), (102, 200))
+        actual = forward([command[k] for k in ALL_JOINT_FIELDS])
+        self.assertAlmostEqual(actual[0], 240)
+        self.assertAlmostEqual(actual[3], .2)
+        self.assertAlmostEqual(actual[4], .3)
+        self.assertAlmostEqual(actual[5], 1.08)
         self.assertEqual(w.control_tabs.tabText(3), "设备/连接")
         w.close()
 

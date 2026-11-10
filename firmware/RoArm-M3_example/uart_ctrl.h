@@ -1,6 +1,11 @@
 #include "studio_update.h"
 void jsonCmdReceiveHandler(){
 	int cmdType = jsonCmdReceive["T"].as<int>();
+  if (gripperOvercurrentStop && cmdType != 105 && cmdType != 626 &&
+      !(cmdType == 211 && (jsonCmdReceive["cmd"] | -1) == 2)) {
+    Serial.println("{\"error\":\"gripper overcurrent stop latched\"}");
+    return;
+  }
 	if ((cmdType>=620 && cmdType<=625) || (studioUpdatePaused && cmdType!=105 && cmdType!=626 && !(cmdType==211 && (jsonCmdReceive["cmd"]|-1)==2))) {
     Serial.println("{\"error\":\"USB maintenance active or serial update command required\"}"); return;
   }
@@ -429,7 +434,7 @@ void serialCtrl() {
       JsonDocument command;
       if(!deserializeJson(command,receivedData)) {
         int type=command["T"]| -1;
-        if(type==0||type==999) {StopFlag=(type==0);if(type==0){char tmp[CMD_MAX_LEN];while(xQueueReceive(cmdQueue,tmp,0)==pdPASS){}}}
+        if(type==0||type==999) {if(!gripperOvercurrentStop) StopFlag=(type==0);if(type==0){char tmp[CMD_MAX_LEN];while(xQueueReceive(cmdQueue,tmp,0)==pdPASS){}}}
         else {
           char packet[CMD_MAX_LEN];receivedData.toCharArray(packet,sizeof(packet));
           QueueHandle_t queue=(type>=620&&type<=625)?serialMaintenanceQueue:cmdQueue;

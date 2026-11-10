@@ -3,8 +3,8 @@ import math
 from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QEvent, QTimer, QSize
 from PySide6.QtGui import QPainter, QColor, QPen, QFont, QPainterPath
 from PySide6.QtWidgets import QWidget, QGroupBox, QHBoxLayout, QVBoxLayout, QLabel, QPushButton, QApplication, QLineEdit, QAbstractSpinBox, QPlainTextEdit, QStackedWidget, QDoubleSpinBox, QFormLayout
-from backend import BASE_FEEDBACK_ERROR, pose_command
-from PySide6.QtWidgets import QCheckBox, QScrollArea, QSizePolicy
+from backend import BASE_FEEDBACK_ERROR
+from PySide6.QtWidgets import QScrollArea, QSizePolicy
 from host_direct import plan_xyz, holding_offset
 from host_control import TargetIntent, XYZ_DEGRADED_MM, base_in_sector
 
@@ -257,11 +257,6 @@ class CartesianPad(QGroupBox):
         info.addWidget(hint, 1)
         self.control_settings = QWidget()
         control_layout = QVBoxLayout(self.control_settings)
-        self.computer_mode = QCheckBox('电脑逆解（发送关节角）')
-        self.computer_mode.setChecked(True)
-        self.computer_mode.toggled.connect(self.computer_toggled)
-        self.computer_mode.setToolTip('电脑一次算出完整关节角，调用“全关节到目标”的同一接口和速度参数；Z 前馈量由下方设置。')
-        self.computer_mode.setObjectName("inverseMode")
         bias_row = QFormLayout()
         self.z_feedforward = QDoubleSpinBox()
         self.z_feedforward.setRange(0, 50)
@@ -330,9 +325,8 @@ class CartesianPad(QGroupBox):
             if self.owner.arm and (self.owner.arm.teaching or self.owner.arm.playing):
                 raise ValueError('请先结束示教或回放')
             values = self.intent_values()
-            measured_angles = values[3:].copy()
             values[:3] = [target.value() for target in self.xyz_targets]
-            self.send_xyz(values, measured_angles)
+            self.send_xyz(values)
         except Exception as e:
             self.owner.error(e)
 
@@ -365,59 +359,49 @@ class CartesianPad(QGroupBox):
             raise ValueError('缺少新鲜的末端坐标反馈')
         return [pose[k] for k in fields[:3]]+[math.degrees(pose[k]) for k in fields[3:]]
 
-    def send_xyz(self, values, measured_angles, offset=None):
-        if self.computer_mode.isChecked():
-            if not self.owner.fresh():raise ValueError('缺少新鲜的关节反馈')
-            key = self.intent_key()
-            with self.owner.shared.lock:
-                measured=[self.owner.shared.pose[k] for k in ('b','s','e','t','r','g')]
-            reference = self.owner.arm.last_joint_target
-            reference = reference.copy() if reference is not None else None
-            bias=self.z_feedforward.value()
-            offset = [0.0]*6 if offset is None else offset
-            cmd, joints, accepted, detail = plan_xyz(values, measured, self.owner.speed.value(),
-                self.owner.acc.value(), bias, offset, reference, allow_degraded=True)
-            if key != self.intent_key():
-                raise ValueError('运动基准已更新，请重试')
-            # Internal routing flag is consumed by Arm before serializing JSON.
-            # Direct PC jogs retain intent; manual angle/home commands invalidate it.
-            self.owner.arm.submit(dict(cmd,_host_intent=True))
-            miss = math.dist(values[:3], accepted[:3])
-            self.xyz_degradation = f'预计末端偏差 {miss:.1f} mm。{detail}' if miss > XYZ_DEGRADED_MM else ''
-            self.set_execution_mode(bool(self.xyz_degradation), self.xyz_degradation)
-            if detail:
-                self.owner.shared.event(f'XYZ {self.xyz_degradation or detail}')
-            for widget,angle in zip(self.owner.targets,joints):widget.setValue(math.degrees(angle))
-            self.owner.shared.event(f'电脑逆解 Z目标 {values[2]:.2f} mm，接受 {accepted[2]:.2f} mm，前馈 +{bias:.1f} mm，保持偏移 {offset[2]:+.2f} mm，关节目标 {cmd}')
-            self.jog_offset = offset
-            self.target_intent.commit(accepted, key)
-        else:
-            self.owner.arm.submit(pose_command(values,measured_angles))
-
-    def computer_toggled(self, checked):
-        self.z_feedforward.setEnabled(checked)
-        self.target_intent.clear()
-        if not checked and self.owner.arm and getattr(self.owner.arm,'host_busy',False):
-            self.owner.hold()
+    def send_xyz(self, values, offset=None):
+        if not self.owner.fresh():raise ValueError('缺少新鲜的关节反馈')
+        key = self.intent_key()
+        with self.owner.shared.lock:
+            measured=[self.owner.shared.pose[k] for k in ('b','s','e','t','r','g')]
+        reference = self.owner.arm.last_joint_target
+        reference = reference.copy() if reference is not None else None
+        bias=self.z_feedforward.value()
+        offset = [0.0]*6 if offset is None else offset
+        cmd, joints, accepted, detail = plan_xyz(values, measured, self.owner.speed.value(),
+            self.owner.acc.value(), bias, offset, reference, allow_degraded=True)
+        if key != self.intent_key():
+            raise ValueError('运动基准已更新，请重试')
+        # Internal routing flag is consumed by Arm before serializing JSON.
+        # Direct PC jogs retain intent; manual angle/home commands invalidate it.
+        self.owner.arm.submit(dict(cmd,_host_intent=True))
+        miss = math.dist(values[:3], accepted[:3])
+        self.xyz_degradation = f'预计末端偏差 {miss:.1f} mm。{detail}' if miss > XYZ_DEGRADED_MM else ''
+        self.set_execution_mode(bool(self.xyz_degradation), self.xyz_degradation)
+        if detail:
+            self.owner.shared.event(f'XYZ {self.xyz_degradation or detail}')
+        for widget,angle in zip(self.owner.targets,joints):widget.setValue(math.degrees(angle))
+        self.owner.shared.event(f'电脑逆解 Z目标 {values[2]:.2f} mm，接受 {accepted[2]:.2f} mm，前馈 +{bias:.1f} mm，保持偏移 {offset[2]:+.2f} mm，关节目标 {cmd}')
+        self.jog_offset = offset
+        self.target_intent.commit(accepted, key)
 
     def intent_key(self):
         return id(self.owner.arm),getattr(self.owner.arm,'reference_generation',0)
 
     def intent_values(self):
         actual=self.actual()
-        return self.target_intent.values(actual,self.intent_key()) if self.computer_mode.isChecked() else actual
+        return self.target_intent.values(actual,self.intent_key())
 
     def move(self, axis, distance):
         try:
             if self.owner.arm and (self.owner.arm.teaching or self.owner.arm.playing):
                 raise ValueError('请先结束手动示教或停止回放')
             values = self.intent_values()
-            measured_angles = values[3:].copy()
             offset = self.jog_offset
-            if self.computer_mode.isChecked() and self.target_intent.key != self.intent_key():
+            if self.target_intent.key != self.intent_key():
                 offset = holding_offset(values,self.owner.arm.last_joint_target)
             values[axis] += distance
-            self.send_xyz(values, measured_angles, offset)
+            self.send_xyz(values, offset)
             if axis in (0, 1):
                 self.disc.flash(axis, distance)
         except Exception as e:

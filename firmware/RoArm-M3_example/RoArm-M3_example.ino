@@ -197,7 +197,7 @@ void loop() {
 
   unsigned long curr_time = millis();
   if (curr_time - prev_time >= 10){
-    if (!studioUpdatePaused) constantHandle();
+    if (!studioUpdatePaused && !gripperOvercurrentStop) constantHandle();
     prev_time = curr_time;
   }
 

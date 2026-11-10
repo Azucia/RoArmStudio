@@ -1,9 +1,10 @@
 """Native-angle teaching files and cancellable, rate-limited trajectory playback."""
 import json
+import logging
 import math
 import time
 from pathlib import Path
-from backend import Worker, KEYS, NAMES, all_command, check_radians, FEEDBACK_TIMEOUT, torque_disabled
+from backend import Worker, KEYS, LIMITS, NAMES, all_command, check_radians, FEEDBACK_TIMEOUT, torque_disabled
 from host_control import XYZ_DEGRADED_MM, forward, xy_in_sector
 
 
@@ -18,15 +19,35 @@ JOINT_SIMPLIFY_TOLERANCE = math.radians(.25)
 TCP_SIMPLIFY_TOLERANCE_MM = 1.
 PITCH_SIMPLIFY_TOLERANCE = math.radians(.5)
 DWELL_SECONDS = .3
+TRACKING_CONFIRM_SECONDS = .25
+TRACKING_SLOW_RATE = .5
+TRACKING_RECOVERY_SECONDS = 1.
+BIAS_STABLE_SECONDS = .45
+BIAS_STABLE_RAD = math.radians(.25)
+BIAS_MAX_RAD = math.radians(1)
+BIAS_RANGE_RAD = math.radians(15)
+WRIST_INDEX = KEYS.index('t')
+WRIST_TEACH_MARGIN_DEG = 3.
+GRIP_PRELOAD_RAD = math.radians(10)
+ARM_KEYS = KEYS[:-1]
+ARM_TOLERANCES = LOADED_TOLERANCES[:-1]
+DWELL_CORRECTION_LIMIT = math.radians(2.5)
+DWELL_CORRECTION_MAX_ERROR = math.radians(3.)
+DWELL_CORRECTION_MAX_TCP_MM = 25.
+DWELL_CORRECTION_ATTEMPTS = 2
 
 
-def load_trajectory(path, sdk=False):
+def load_trajectory(path, sdk=False, *, include_metadata=False):
     path = Path(path)
     if path.stat().st_size > 50*1024*1024:
         raise ValueError('轨迹文件超过 50 MB')
     data = json.loads(path.read_text(encoding='utf-8-sig'))
+    metadata = {}
     if isinstance(data, dict) and data.get('format') == 'roarm-studio-native-v1':
         records = data['records']
+        clip = data.get('wrist_clip_deg', 0.)
+        if type(clip) in (float, int) and 0 < clip <= WRIST_TEACH_MARGIN_DEG:
+            metadata['wrist_clip_deg'] = clip
         sdk = False
     elif isinstance(data, list) and sdk:
         records = [{'time': r['timestamped'], 'radians': list(r['radians'])} for r in data]
@@ -47,7 +68,7 @@ def load_trajectory(path, sdk=False):
             raise ValueError('轨迹时间必须递增，总时长不超过 10 小时')
         result.append(dict(time=stamp, radians=values))
         previous = stamp
-    return result
+    return (result, metadata) if include_metadata else result
 
 
 def simplify_trajectory(records):
@@ -100,13 +121,29 @@ def simplify_trajectory(records):
     return [records[index] for index in sorted(kept)]
 
 
-def save_trajectory(path, records, sample_count=None):
+def dwell_starts(records):
+    """Find holds in the recorded timebase, including simplified long holds."""
+    start = 0
+    for index in range(1, len(records) + 1):
+        if index < len(records):
+            moved = any(abs(a - b) > ENCODER_STEP for a, b in
+                        zip(records[index]['radians'], records[start]['radians']))
+            if not moved:
+                continue
+        if records[index - 1]['time'] - records[start]['time'] >= DWELL_SECONDS:
+            yield start
+        start = index
+
+
+def save_trajectory(path, records, sample_count=None, *, wrist_clip_deg=0.):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix('.tmp')
     data = dict(format='roarm-studio-native-v1', records=records)
     if sample_count is not None:
         data['sample_count'] = sample_count
+    if wrist_clip_deg:
+        data['wrist_clip_deg'] = wrist_clip_deg
     temp.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
     temp.replace(path)
 
@@ -123,8 +160,8 @@ class TeachLibrary:
             raise ValueError('示教槽位必须为 1–12')
         return self.directory / f'teach-{slot:02d}.json'
 
-    def load(self, slot):
-        return load_trajectory(self.path(slot))
+    def load(self, slot, *, include_metadata=False):
+        return load_trajectory(self.path(slot), include_metadata=include_metadata)
 
     def slots(self):
         return [{'slot': slot, 'name': f'示教{slot}', 'occupied': self.path(slot).is_file()}
@@ -137,6 +174,7 @@ class TeachRecorder(Worker):
         self.path = Path(path)
         self.count = 0
         self.error = None
+        self.wrist_clip_deg = 0.
 
     def run(self):
         records, last = [], 0
@@ -147,6 +185,17 @@ class TeachRecorder(Worker):
                     pose, pt = self.shared.pose, self.shared.pose_time
                 if pose and pt != last and time.monotonic()-pt < .6:
                     values = [pose[k] for k in KEYS]
+                    wrist = math.degrees(values[WRIST_INDEX])
+                    low, high = LIMITS[WRIST_INDEX]
+                    if wrist < low or wrist > high:
+                        clipped = min(high, max(low, wrist))
+                        deviation = abs(wrist - clipped)
+                        if deviation > WRIST_TEACH_MARGIN_DEG:
+                            raise ValueError(f'腕部俯仰反馈 {wrist:.2f}°，超过示教贴边范围；本次未保存')
+                        values[WRIST_INDEX] = math.radians(clipped)
+                        if self.wrist_clip_deg == 0.:
+                            self.shared.event('示教腕部贴边：这段回放目标将限制在 ±90°，请查看保存提示')
+                        self.wrist_clip_deg = max(self.wrist_clip_deg, deviation)
                     check_radians(values)
                     records.append(dict(time=pt-started, radians=values))
                     last = pt
@@ -160,15 +209,57 @@ class TeachRecorder(Worker):
             for row in records:
                 row['time'] -= offset
             keyframes = simplify_trajectory(records)
-            save_trajectory(self.path, keyframes, len(records))
+            save_trajectory(self.path, keyframes, len(records), wrist_clip_deg=self.wrist_clip_deg)
             self.shared.event(f'示教轨迹已保存：{self.path}，{len(records)} 个采样 → {len(keyframes)} 个关键点')
         except Exception as e:
             self.error = str(e)
+            logging.getLogger(__name__).warning('示教录制失败：%s', self.error)
             self.shared.event(f'示教录制：{e}')
 
 
+class ReplayLoadBias:
+    """Learn shoulder/elbow hold error only while target and feedback are steady."""
+
+    def __init__(self):
+        self.anchor = None
+        self.last_stamp = None
+        self.learned_at = None
+        self.learned = (0., 0.)
+        self.applied = (0., 0.)
+
+    def target(self, nominal, measured, stamp):
+        nominal = tuple(nominal)
+        if self.learned_at is not None and abs(nominal[5] - self.learned_at[5]) > BIAS_STABLE_RAD:
+            self.learned_at = None
+        if self.anchor is not None and any(
+                abs(a-b) > BIAS_STABLE_RAD for a, b in zip(nominal, self.anchor[0])):
+            self.anchor = None
+        if stamp != self.last_stamp:
+            self.last_stamp = stamp
+            if self.anchor is None or any(
+                    abs(a-b) > BIAS_STABLE_RAD for a, b in zip(measured, self.anchor[1])):
+                self.anchor = (nominal, tuple(measured), stamp)
+            elif stamp - self.anchor[2] >= BIAS_STABLE_SECONDS:
+                errors = [want - have for want, have in zip(nominal, measured)]
+                if all(abs(error) <= limit for error, limit in zip(errors, ARM_TOLERANCES)):
+                    self.learned_at = nominal
+                    self.learned = tuple(
+                        max(-BIAS_MAX_RAD, min(BIAS_MAX_RAD, bias + .5 * errors[joint]))
+                        for joint, bias in zip((1, 2), self.applied))
+                self.anchor = None
+        weight = 0.
+        if self.learned_at is not None:
+            distance = max(abs(a-b) for a, b in zip(nominal[1:5], self.learned_at[1:5]))
+            weight = max(0., 1. - distance / BIAS_RANGE_RAD)
+        self.applied = tuple(
+            old + max(-BIAS_STABLE_RAD, min(BIAS_STABLE_RAD, weight * bias - old))
+            for old, bias in zip(self.applied, self.learned))
+        return (nominal[0], nominal[1] + self.applied[0], nominal[2] + self.applied[1], *nominal[3:])
+
+
 class Playback(Worker):
-    def __init__(self, shared, arm, records, factor=.5, speed=150, acc=5, *, external_token=None):
+    def __init__(self, shared, arm, records, factor=.5, speed=150, acc=5, *,
+                 external_token=None, load_compensation=False):
         super().__init__(shared)
         self.arm, self.records = arm, records
         self.factor, self.speed, self.acc = factor, speed, acc
@@ -182,6 +273,17 @@ class Playback(Worker):
         self.serial_written = False
         self.receipt = None
         self._target_angles = None
+        self.last_motor_target = None
+        self.dwell_correction = None
+        self.load_bias = ReplayLoadBias() if load_compensation else None
+        self.grip_reference = None
+        self.grip_closing = False
+        self.reset_tracking()
+
+    def reset_tracking(self):
+        self.tracking_stamp = None
+        self.tracking_since = [None, None, None]
+        self.tracking_rate = 1.
 
     def ensure(self):
         if self.stop.is_set() or self.arm.stop.is_set() or self.arm.epoch != self.token:
@@ -197,8 +299,31 @@ class Playback(Worker):
 
     def send(self, values):
         self.ensure()
+        motor_target = values
+        if self.load_bias is not None and self.serial_written:
+            with self.shared.lock:
+                measured = [self.shared.pose[key] for key in KEYS]
+                stamp = self.shared.pose_time
+            motor_target = self.load_bias.target(values, measured, stamp)
+        grip = self.preload_grip(values[-1])
+        motor_target = [*motor_target[:-1], grip]
+        if self.dwell_correction is not None:
+            anchor, offsets = self.dwell_correction
+            distance = max(abs(a-b) for a, b in zip(values, anchor))
+            weight = max(0., 1. - distance / BIAS_RANGE_RAD)
+            if not weight:
+                self.dwell_correction = None
+            for joint, offset in zip((1, 2), offsets):
+                motor_target[joint] += weight * (values[joint] + offset - motor_target[joint])
+        self.write_motor_target(values, motor_target, self.speed, self.acc)
+
+    def write_motor_target(self, values, motor_target, speed, acceleration):
+        self.ensure()
+        command = all_command(motor_target, speed, acceleration)
+        if tuple(motor_target) != tuple(values):
+            command['_teach_nominal'] = list(values)
         with self.arm.command_lock:
-            receipt = self.arm.submit(all_command(values, self.speed, self.acc), token=self.token)
+            receipt = self.arm.submit(command, token=self.token)
             self.receipt = receipt
         deadline = time.monotonic()+1
         # Feedback can arrive before a queued command is written. Do not start
@@ -213,6 +338,15 @@ class Playback(Worker):
         self.serial_written = True
         self.ensure()
         self._target_angles = tuple(values)
+        self.last_motor_target = tuple(motor_target)
+
+    def preload_grip(self, nominal):
+        if self.grip_reference is None:
+            self.grip_reference = nominal
+        elif abs(nominal - self.grip_reference) >= ENCODER_STEP * .5:
+            self.grip_closing = nominal > self.grip_reference
+            self.grip_reference = nominal
+        return min(math.radians(LIMITS[-1][1]), nominal + GRIP_PRELOAD_RAD) if self.grip_closing else nominal
 
     @property
     def target_angles(self):
@@ -227,11 +361,12 @@ class Playback(Worker):
     def degraded(self):
         return self.xyz_error_mm > XYZ_DEGRADED_MM
 
-    def wait_target(self, target, timeout):
+    def wait_target(self, target, timeout, *, final=False, label='示教终点', correct_dwell=False):
         end = time.monotonic()+timeout
         anchor=None
         stamp_before=self.shared.pose_time
         target_xyz = forward(target)[:3]
+        correction_errors = []
         while True:
             self.ensure()
             with self.shared.lock:
@@ -239,28 +374,69 @@ class Playback(Worker):
                 pose=self.shared.pose
             if pose and stamp>stamp_before:
                 q=[pose[k] for k in KEYS]
-                errors=[abs(v-t) for v,t in zip(q,target)]
+                errors=[abs(v-t) for v,t in zip(q[:-1],target)]
                 xyz_error = math.dist(forward(q)[:3], target_xyz)
-                if max(errors) < STRICT_TOLERANCE:
+                strict = max(errors) < STRICT_TOLERANCE
+                if strict and not final:
                     self.xyz_error_mm = xyz_error
                     return
-                # Only the loaded shoulder/elbow may settle slightly outside 4 degrees.
-                if all(e <= limit for e, limit in zip(errors, LOADED_TOLERANCES)):
-                    if anchor is None or max(abs(v-w) for v,w in zip(q,anchor[1]))>math.radians(.35):
-                        anchor=(stamp,q)
+                if final:
+                    self.xyz_error_mm = xyz_error
+                within_joints = strict or all(e <= limit for e, limit in zip(errors, ARM_TOLERANCES))
+                arrived = within_joints and (not final or xyz_error <= XYZ_DEGRADED_MM)
+                correctable = (correct_dwell and within_joints and self.last_motor_target is not None
+                               and max(errors[1:3]) <= DWELL_CORRECTION_MAX_ERROR
+                               and max(errors[0], *errors[3:]) <= math.radians(2.)
+                               and XYZ_DEGRADED_MM < xyz_error <= DWELL_CORRECTION_MAX_TCP_MM)
+                if arrived or correctable:
+                    if anchor is None or max(abs(v-w) for v,w in zip(q[:-1],anchor[1]))>math.radians(.35):
+                        anchor=(stamp,q[:-1])
                     elif stamp-anchor[0]>=.45:
                         self.xyz_error_mm = xyz_error
-                        if not self.loaded_tolerance:
+                        if correctable:
+                            if correction_errors and xyz_error >= correction_errors[-1] - .25:
+                                raise RuntimeError(f'{label}微调未改善：{correction_errors[-1]:.1f} → '
+                                                   f'{xyz_error:.1f} mm，已停止后续动作')
+                            if len(correction_errors) >= DWELL_CORRECTION_ATTEMPTS:
+                                raise RuntimeError(f'{label}微调后仍未到位：{correction_errors[0]:.1f} → '
+                                                   f'{xyz_error:.1f} mm（要求 ≤ {XYZ_DEGRADED_MM:g} mm）')
+                            correction_errors.append(xyz_error)
+                            self.correct_dwell_target(target, q, xyz_error)
+                            with self.shared.lock:
+                                stamp_before = self.shared.pose_time
+                            anchor = None
+                            continue
+                        if correction_errors:
+                            self.shared.event(f'{label}微调到位：{correction_errors[0]:.1f} → {xyz_error:.1f} mm')
+                        if not strict and not self.loaded_tolerance:
                             self.loaded_tolerance = True
                             self.shared.event('带载关节已停稳，按实测容差继续回放')
                         return
                 else:
                     anchor=None
             if time.monotonic() > end:
-                diffs=[abs(pose[k]-v) for k,v in zip(KEYS,target)]
+                diffs=[abs(pose[k]-v) for k,v in zip(ARM_KEYS,target)]
                 i=diffs.index(max(diffs))
+                if final:
+                    raise RuntimeError(
+                        f'{label}未到位：编码器估算末端偏差 {self.xyz_error_mm:.1f} mm'
+                        f'（要求 ≤ {XYZ_DEGRADED_MM:g} mm 且停稳）；'
+                        f'{NAMES[i]}目标 {math.degrees(target[i]):.1f}°，反馈 {math.degrees(pose[KEYS[i]]):.1f}°')
                 raise RuntimeError(f'{NAMES[i]}未到位：目标 {math.degrees(target[i]):.1f}°，实测 {math.degrees(pose[KEYS[i]]):.1f}°，回放已停止')
             self.stop.wait(.05)
+
+    def correct_dwell_target(self, target, observed, xyz_error):
+        motor = list(self.last_motor_target)
+        for joint in (1, 2):
+            offset = (motor[joint] - target[joint]) + (target[joint] - observed[joint])
+            motor[joint] = target[joint] + max(-DWELL_CORRECTION_LIMIT, min(DWELL_CORRECTION_LIMIT, offset))
+        if max(abs(motor[joint] - self.last_motor_target[joint]) for joint in (1, 2)) < ENCODER_STEP:
+            raise RuntimeError(f'示教停顿点微调已达限额，末端仍偏 {xyz_error:.1f} mm')
+        self.write_motor_target(target, motor, min(self.speed, 100), min(self.acc, 5))
+        offsets = tuple(motor[joint] - target[joint] for joint in (1, 2))
+        self.dwell_correction = (tuple(target), offsets)
+        self.shared.event(f'示教停顿点微调：末端偏 {xyz_error:.1f} mm，'
+                          f'肩部偏置 {math.degrees(offsets[0]):+.2f}°，肘部偏置 {math.degrees(offsets[1]):+.2f}°')
 
     def wait_until(self, deadline):
         while True:
@@ -270,44 +446,106 @@ class Playback(Worker):
                 return
             self.stop.wait(min(remaining, REPLAY_PERIOD))
 
-    def wait_if_lagging(self, target):
+    def check_tracking(self, target):
+        self.ensure()
         with self.shared.lock:
-            pose = self.shared.pose
-        limits = LOADED_TOLERANCES if self.loaded_tolerance else (STRICT_TOLERANCE,) * len(KEYS)
-        if any(abs(pose[k] - value) > limit for k, value, limit in zip(KEYS, target, limits)):
-            self.wait_target(target, 5)
+            pose, stamp = self.shared.pose, self.shared.pose_time
+        if stamp == self.tracking_stamp:
+            return
+        self.tracking_stamp = stamp
+        errors = [abs(pose[key] - value) for key, value in zip(ARM_KEYS, target)]
+        ratio = max(error / limit for error, limit in zip(errors, ARM_TOLERANCES))
+        for i, condition in enumerate((ratio > 1., ratio > 2., ratio <= .8)):
+            if not condition:
+                self.tracking_since[i] = None
+            elif self.tracking_since[i] is None:
+                self.tracking_since[i] = stamp
+
+        late, excessive, recovered = [
+            start is not None and stamp - start >= TRACKING_CONFIRM_SECONDS
+            for start in self.tracking_since
+        ]
+        if excessive:
+            self.recover_tracking(target, stamp)
+            return True
+        if late and self.tracking_rate == 1.:
+            self.tracking_rate = TRACKING_SLOW_RATE
+            self.shared.event('示教途中跟随落后，轨迹时钟已降至计划速度的 50%')
+        elif recovered and self.tracking_rate != 1.:
+            self.tracking_rate = 1.
+            self.shared.event('示教途中跟随恢复，轨迹时钟已恢复计划速度')
+
+    def recover_tracking(self, target, stamp):
+        """Freeze the trajectory and let the arm finish its last written target."""
+        self.shared.event('示教途中跟随超差，暂停发点，等待追上当前目标')
+        deadline = time.monotonic() + TRACKING_RECOVERY_SECONDS
+        good_frames = 0
+        while True:
+            self.ensure()
+            with self.shared.lock:
+                pose, latest = self.shared.pose, self.shared.pose_time
+            errors = [abs(pose[key] - value) for key, value in zip(ARM_KEYS, target)]
+            if stamp < latest <= deadline:
+                stamp = latest
+                in_range = all(error <= limit for error, limit in zip(errors, ARM_TOLERANCES))
+                good_frames = good_frames + 1 if in_range else 0
+                if good_frames >= 2:
+                    self.reset_tracking()
+                    self.tracking_stamp = stamp
+                    self.tracking_rate = TRACKING_SLOW_RATE
+                    self.shared.event('示教已追上当前目标，以半速继续')
+                    return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                joint = max(range(len(ARM_KEYS)), key=lambda i: errors[i] / ARM_TOLERANCES[i])
+                raise RuntimeError(f'示教途中跟随超差：{NAMES[joint]}未在 1 秒内追上，'
+                                   f'偏差 {math.degrees(errors[joint]):.1f}°，已停止后续动作')
+            self.stop.wait(min(remaining, REPLAY_PERIOD))
 
     def run(self):
         try:
             self.ensure()
             first = self.records[0]['radians']
-            delta = max(abs(self.shared.pose[k]-v) for k, v in zip(KEYS, first))
+            delta = max(abs(self.shared.pose[k]-v) for k, v in zip(ARM_KEYS, first))
             self.shared.event('回放：先移动到首帧位置')
             self.send(first)
-            self.wait_target(first, delta * STEPS_PER_RAD / self.speed + 15)
+            if len(self.records) == 1:
+                self.wait_target(first, delta * STEPS_PER_RAD / self.speed + 15, final=True)
+            else:
+                self.wait_target(first, delta * STEPS_PER_RAD / self.speed + 15)
             last_target = first
-            last_update = time.monotonic()
+            deadline = written_at = time.monotonic()
+            holds = set(dwell_starts(self.records))
             total_time = self.records[-1]['time']
             for i in range(1, len(self.records)):
                 a, b = self.records[i-1], self.records[i]
+                if i > 1 and i - 1 in holds:
+                    self.wait_target(last_target, 5, final=True, label='示教停顿点', correct_dwell=True)
+                    self.reset_tracking()
+                    deadline = written_at = time.monotonic()
                 duration = max((b['time']-a['time'])/self.factor,
                                max(abs(x-y) for x, y in zip(a['radians'], b['radians'])) * STEPS_PER_RAD / self.speed,
                                REPLAY_PERIOD)
                 samples = max(1, int(duration / REPLAY_PERIOD))
                 interval = duration / samples
                 for sample in range(1, samples + 1):
-                    self.wait_until(last_update + interval)
-                    self.wait_if_lagging(last_target)
-                    # Resume from the current time after a tracking pause, without a burst of overdue targets.
-                    last_update = time.monotonic()
+                    step = interval / self.tracking_rate
+                    deadline += step
+                    # Absorb ordinary dispatch jitter, but never burst overdue targets.
+                    if deadline - written_at < REPLAY_PERIOD * .4:
+                        deadline = written_at + step
+                    self.wait_until(deadline)
+                    if self.check_tracking(last_target):
+                        deadline = time.monotonic()
                     ratio = sample / samples
                     last_target = (b['radians'] if sample == samples else
                                    [x + (y - x) * ratio for x, y in zip(a['radians'], b['radians'])])
                     self.send(last_target)
+                    written_at = self.receipt.written_at if self.receipt is not None else time.monotonic()
                     if i < len(self.records) - 1 or sample < samples:
                         self.progress = (a['time'] + (b['time'] - a['time']) * ratio) / total_time
             if len(self.records) > 1:
-                self.wait_target(last_target, 5)
+                self.wait_target(last_target, 5, final=True)
             self.progress = 1.
             self.shared.event('示教回放完成')
         except InterruptedError:
@@ -315,6 +553,7 @@ class Playback(Worker):
             self.shared.event('示教回放已停止')
         except Exception as e:
             self.error = str(e)
+            logging.getLogger(__name__).warning('示教回放失败（进度 %.1f%%）：%s', self.progress * 100, self.error)
             self.shared.event(f'回放：{e}')
         finally:
             with self.arm.command_lock:

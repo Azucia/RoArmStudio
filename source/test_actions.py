@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-from actions import load_trajectory, simplify_trajectory, TeachRecorder, Playback
+from actions import load_trajectory, simplify_trajectory, TeachRecorder, Playback, ReplayLoadBias
 from backend import Shared, Arm, KEYS, pose_command, public_command, all_command
 from test_backend import FakeSerial
 
@@ -29,6 +29,71 @@ class MotionSerial(FakeSerial):
 
 
 class ActionTests(unittest.TestCase):
+    def test_replay_preloads_grip_only_on_close_and_keeps_native_limit(self):
+        shared = Shared()
+        arm = Arm(shared, 'TEST')
+        arm.connected = True
+        pose = [0., .1, 1.5, 0., 0., math.radians(125)]
+        shared.pose = dict(zip(KEYS, pose))
+        shared.pose_time = time.monotonic()
+        player = Playback(shared, arm, [])
+        receipt = SimpleNamespace(done=SimpleNamespace(wait=lambda _: True), error=None)
+        with patch.object(arm, 'submit', return_value=receipt) as submit:
+            for nominal, sent in ((125, 125), (145, 155), (145, 155), (175, 180), (160, 160)):
+                player.send([*pose[:-1], math.radians(nominal)])
+                command = submit.call_args.args[0]
+                self.assertAlmostEqual(math.degrees(command['hand']), sent)
+                self.assertEqual([command[k] for k in ('base', 'shoulder', 'elbow', 'wrist', 'roll')], pose[:-1])
+
+    def test_held_object_does_not_slow_replay_or_fail_endpoint(self):
+        shared = Shared()
+        arm = Arm(shared, 'TEST')
+        arm.connected = True
+        target = [0., .1, 1.5, 0., 0., math.pi]
+        shared.pose = dict(zip(KEYS, [*target[:-1], math.radians(135)]))
+        now = 1.
+        shared.pose_time = now
+        player = Playback(shared, arm, [])
+
+        def feedback(seconds):
+            nonlocal now
+            now += seconds
+            shared.pose_time = now
+
+        with patch('actions.time', SimpleNamespace(monotonic=lambda: now)), \
+             patch.object(player.stop, 'wait', feedback):
+            player.check_tracking(target)
+            feedback(.3)
+            player.check_tracking(target)
+            self.assertEqual(player.tracking_rate, 1.)
+            player.wait_target(target, 1., final=True)
+        self.assertAlmostEqual(player.xyz_error_mm, 0.)
+
+    def test_replay_bias_only_learns_at_rest_and_fades_after_grip_change(self):
+        bias = ReplayLoadBias()
+        nominal = (0., .1, 1.5, 0., 0., 3.14)
+        sag = math.radians(2)
+        for frame in range(12):
+            moving = (0., .1 + math.radians(frame), *nominal[2:])
+            observed = (0., moving[1] - sag, moving[2] + sag, *moving[3:])
+            self.assertEqual(bias.target(moving, observed, frame * .1), moving)
+
+        observed = (0., nominal[1] - sag, nominal[2] + sag, *nominal[3:])
+        for frame in range(9):
+            corrected = bias.target(nominal, observed, 2 + frame * .1)
+        self.assertAlmostEqual(math.degrees(corrected[1] - nominal[1]), 1.)
+        self.assertAlmostEqual(math.degrees(corrected[2] - nominal[2]), -1.)
+
+        nearby = (0., .1 + math.radians(3), *nominal[2:])
+        corrected = bias.target(nearby, observed, 3.)
+        self.assertAlmostEqual(math.degrees(corrected[1] - nearby[1]), .8)
+        self.assertEqual(corrected[3:], nearby[3:])
+
+        opening = (*nearby[:5], 3.0)
+        for frame in range(4):
+            corrected = bias.target(opening, observed, 3.1 + frame * .05)
+        self.assertEqual(corrected, opening)
+
     def test_pose_units_and_secret_redaction(self):
         cmd = pose_command([235, 0, 234, 45, -90, 180])
         self.assertEqual(cmd['T'], 1041)
@@ -75,6 +140,43 @@ class ActionTests(unittest.TestCase):
             self.assertEqual(saved['sample_count'], recorder.count)
             self.assertGreaterEqual(len(load_trajectory(recorder.path)), 2)
             self.assertLess(len(saved['records']), saved['sample_count'])
+
+    def test_teach_wrist_clip_is_disclosed_and_larger_excursion_preserves_saved_slot(self):
+        shared = Shared()
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'teach-01.json'
+            recorder = TeachRecorder(shared, path)
+            recorder.start()
+            try:
+                for count, wrist in enumerate((-89., -92.4609375, -88.), start=1):
+                    with shared.lock:
+                        shared.pose = dict(zip(KEYS, [0., .2, 1.3, math.radians(wrist), 0., math.pi]))
+                        shared.pose_time = time.monotonic()
+                    deadline = time.monotonic() + 1
+                    while recorder.count < count and time.monotonic() < deadline:
+                        time.sleep(.01)
+                    self.assertEqual(recorder.count, count)
+            finally:
+                recorder.stop.set()
+                recorder.join(2)
+            self.assertIsNone(recorder.error)
+            records, metadata = load_trajectory(path, include_metadata=True)
+            self.assertEqual(min(row['radians'][3] for row in records), -math.pi/2)
+            self.assertAlmostEqual(metadata['wrist_clip_deg'], 2.4609375)
+
+            original = path.read_bytes()
+            with shared.lock:
+                shared.pose['t'] = math.radians(-94)
+                shared.pose_time = time.monotonic()
+            rejected = TeachRecorder(shared, path)
+            rejected.start()
+            try:
+                rejected.join(1)
+                self.assertIn('-94.00°', rejected.error)
+                self.assertEqual(path.read_bytes(), original)
+            finally:
+                rejected.stop.set()
+                rejected.join(2)
 
     def test_teaching_simplification_uses_original_timestamps(self):
         records = [dict(time=t, radians=[t*.2, 0., math.pi/2, 0., 0., math.pi])
@@ -138,10 +240,33 @@ class ActionTests(unittest.TestCase):
             shared.pose_time = now
 
         with patch('actions.time', SimpleNamespace(monotonic=lambda: now)), patch.object(player.stop, 'wait', advance):
-            player.wait_target(target, 1.)
+            player.wait_target(target, 1., final=True)
         self.assertTrue(player.loaded_tolerance)
         self.assertAlmostEqual(player.xyz_error_mm, 6.5364, places=3)
         self.assertFalse(player.degraded)
+
+    def test_endpoint_rejects_large_tcp_miss_even_inside_joint_tolerances(self):
+        shared = Shared()
+        arm = Arm(shared, 'TEST')
+        arm.connected = True
+        target = [0., 0., math.pi/2, 0., 0., math.pi]
+        observed = target.copy()
+        observed[1] += math.radians(3.52)
+        observed[2] += math.radians(2.11)
+        shared.pose = dict(zip(KEYS, observed))
+        player = Playback(shared, arm, [])
+        now = 1.
+        shared.pose_time = now
+
+        def advance(seconds):
+            nonlocal now
+            now += seconds
+            shared.pose_time = now
+
+        with patch('actions.time', SimpleNamespace(monotonic=lambda: now)), patch.object(player.stop, 'wait', advance):
+            with self.assertRaisesRegex(RuntimeError, '示教终点未到位.*mm'):
+                player.wait_target(target, 1., final=True)
+        self.assertGreater(player.xyz_error_mm, 10)
 
     def test_replay_and_cancel_token(self):
         shared = Shared()
@@ -201,6 +326,7 @@ class ActionTests(unittest.TestCase):
             player.run()
         self.assertIsNone(player.error)
         self.assertEqual(settle.call_count, 2)
+        settle.assert_called_with(records[-1]['radians'], 5, final=True)
         self.assertEqual([angles for _, angles in writes], [r['radians'] for r in records])
         self.assertAlmostEqual(writes[-1][0], .5)
 
@@ -219,25 +345,121 @@ class ActionTests(unittest.TestCase):
         send.assert_called_once_with(target)
         settle.assert_called_once()
 
-    def test_replay_pauses_for_lagging_wrist_even_in_degraded_mode(self):
+    def test_replay_slows_then_aborts_for_sustained_wrist_lag(self):
         shared = Shared()
         arm = Arm(shared, 'TEST')
         arm.connected = True
         start = [0., 0., math.pi/2, 0., 0., math.pi]
         shared.pose = dict(zip(KEYS, start))
-        shared.pose_time = time.monotonic()
-        records = [dict(time=i, radians=[*start[:3], i*.12, *start[4:]]) for i in range(3)]
+        now = 0.
+        shared.pose_time = now
+        records = [dict(time=i, radians=[*start[:3], i*.14, *start[4:]]) for i in range(4)]
         player = Playback(shared, arm, records)
         player.loaded_tolerance = True
-        with patch.object(player, 'wait_until'), patch.object(player, 'send') as send, \
-             patch.object(player, 'wait_target', side_effect=[None, RuntimeError('手腕未到位')]) as settle:
+        def advance(deadline):
+            nonlocal now
+            now = deadline
+            shared.pose_time = now
+
+        with patch('actions.time', SimpleNamespace(monotonic=lambda: now)), \
+             patch.object(player, 'wait_until', side_effect=advance), \
+             patch.object(player.stop, 'wait', side_effect=lambda seconds: advance(now + seconds)), \
+             patch.object(player, 'send') as send, patch.object(player, 'wait_target') as settle:
             player.run()
-        self.assertEqual(player.error, '手腕未到位')
+        self.assertIn('示教途中跟随超差：腕部俯仰', player.error)
+        self.assertEqual(player.tracking_rate, .5)
         last_target = send.call_args.args[0]
-        self.assertGreater(last_target[3], .07)
+        self.assertGreater(last_target[3], .14)
         self.assertLess(last_target[3], records[-1]['radians'][3])
-        self.assertEqual(settle.call_args.args[0], last_target)
+        settle.assert_called_once()
         self.assertFalse(arm.playing)
+
+    def test_tracking_recovers_only_after_two_fresh_frames_without_writing(self):
+        shared = Shared()
+        arm = Arm(shared, 'TEST')
+        arm.connected = True
+        target = [0., 0., math.pi/2, 0., 0., math.pi]
+        player = Playback(shared, arm, [])
+        now = 1.
+        shared.pose_time = now
+        shared.pose = dict(zip(KEYS, target))
+        shared.pose['t'] = math.radians(8.1)
+        feedback = iter((6.5, 4.2, 2.2, .9))
+
+        def advance(seconds):
+            nonlocal now
+            now += seconds
+            if round((now-1.)*20) % 2 == 0:
+                shared.pose['t'] = math.radians(next(feedback))
+                shared.pose_time = now
+
+        with patch('actions.time', SimpleNamespace(monotonic=lambda: now)), \
+             patch.object(player.stop, 'wait', advance), patch.object(arm, 'submit') as submit:
+            player.recover_tracking(target, shared.pose_time)
+        self.assertAlmostEqual(now, 1.4)
+        self.assertEqual(player.tracking_rate, .5)
+        submit.assert_not_called()
+
+    def test_recorded_hold_is_checked_once_before_the_next_motion(self):
+        shared = Shared()
+        arm = Arm(shared, 'TEST')
+        arm.connected = True
+        first = [0., 0., math.pi/2, 0., 0., math.pi]
+        hold = [.02, *first[1:]]
+        last = [.04, *first[1:]]
+        shared.pose = dict(zip(KEYS, first))
+        shared.pose_time = time.monotonic()
+        records = [dict(time=t, radians=q) for t, q in ((0, first), (.1, hold), (1.1, hold), (1.2, last))]
+        player = Playback(shared, arm, records, factor=2)
+        with patch.object(player, 'wait_until'), patch.object(player, 'send'), \
+             patch.object(player, 'wait_target') as settle:
+            player.run()
+        self.assertIsNone(player.error)
+        self.assertEqual(settle.call_count, 3)
+        self.assertEqual(settle.call_args_list[1].args, (hold, 5))
+        self.assertEqual(settle.call_args_list[1].kwargs, dict(final=True, label='示教停顿点', correct_dwell=True))
+
+    def test_dwell_corrects_logged_shoulder_elbow_error_and_keeps_grip_target(self):
+        target = list(map(math.radians, (36.83, 7.73, 60.82, 88.51, .09, 154.42)))
+        measured = list(map(math.radians, (36.91, 9.67, 62.58, 88.86, .18, 154.95)))
+        for follows in (True, False):
+            with self.subTest(follows=follows):
+                shared = Shared()
+                arm = Arm(shared, 'TEST')
+                arm.connected = True
+                player = Playback(shared, arm, [], speed=600)
+                initial_motor = [*target[:-1], math.radians(164.42)]
+                player.last_motor_target = tuple(initial_motor)
+                current = measured.copy()
+                now = 1.
+                shared.pose = dict(zip(KEYS, current))
+                shared.pose_time = now
+
+                def update(seconds):
+                    nonlocal now
+                    now += seconds
+                    shared.pose = dict(zip(KEYS, current))
+                    shared.pose_time = now
+
+                def write(nominal, motor, speed, acc):
+                    self.assertEqual(nominal, target)
+                    self.assertEqual((motor[-1], speed, acc), (initial_motor[-1], 100, 5))
+                    self.assertAlmostEqual(math.degrees(motor[1] - target[1]), -1.94)
+                    self.assertAlmostEqual(math.degrees(motor[2] - target[2]), -1.76)
+                    player.last_motor_target = tuple(motor)
+                    if follows:
+                        current[1:3] = target[1:3]
+
+                with patch('actions.time', SimpleNamespace(monotonic=lambda: now)), \
+                     patch.object(player.stop, 'wait', update), \
+                     patch.object(player, 'write_motor_target', side_effect=write) as send:
+                    if follows:
+                        player.wait_target(target, 5, final=True, label='示教停顿点', correct_dwell=True)
+                        self.assertLess(player.xyz_error_mm, 10)
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, '微调未改善'):
+                            player.wait_target(target, 5, final=True, label='示教停顿点', correct_dwell=True)
+                send.assert_called_once()
 
 
 if __name__ == '__main__':

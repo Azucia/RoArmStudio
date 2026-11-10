@@ -5,7 +5,7 @@ import time
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (QDialog, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout,
     QGridLayout, QLabel, QPushButton, QDoubleSpinBox, QSpinBox, QComboBox,
-    QLineEdit, QPlainTextEdit, QFileDialog, QMessageBox, QInputDialog, QApplication, QButtonGroup)
+    QLineEdit, QPlainTextEdit, QFileDialog, QMessageBox, QInputDialog, QApplication, QButtonGroup, QCheckBox)
 from backend import KEYS, NAMES, all_command, pose_command
 from actions import TEACH_SLOTS, TeachRecorder, Playback, load_trajectory, save_trajectory
 from host_control import base_in_sector
@@ -107,7 +107,11 @@ class Controls(QDialog):
         row.addWidget(self.factor)
         self.play_btn = self.button(row, '开始回放', self.play)
         layout.addLayout(row)
+        self.load_compensation = QCheckBox('肩肘负载补偿（试验）')
+        self.load_compensation.setToolTip('根据停稳反馈估计肩肘偏差，在附近路径上最多各修正 1°。仅用于本次界面回放。')
+        layout.addWidget(self.load_compensation)
         self.play_state = QLabel('未开始')
+        self.play_state.setWordWrap(True)
         layout.addWidget(self.play_state)
         row = QHBoxLayout()
         self.import_format = QComboBox()
@@ -118,7 +122,7 @@ class Controls(QDialog):
         row.addWidget(self.import_format, 1)
         self.import_btn = self.button(row, '导入本槽', self.load)
         layout.addLayout(row)
-        text = QLabel('倍率调整轨迹时间，实际速度受关节上限和跟随误差约束。\n请先结束手动示教并托稳机械臂。')
+        text = QLabel('普通路径连续回放。持续落后时降速；严重超差时暂停发点，未能追上则停止。\n请先结束手动示教并托稳机械臂。')
         text.setWordWrap(True)
         layout.addWidget(text)
         row = QHBoxLayout()
@@ -190,9 +194,11 @@ class Controls(QDialog):
             button.setToolTip('已有轨迹' if item['occupied'] else '空槽位')
         name = f'示教{self.teach_slot}'
         try:
-            records = self.teach_library.load(self.teach_slot)
+            records, metadata = self.teach_library.load(self.teach_slot, include_metadata=True)
             count = f'{sample_count} 个采样 → ' if sample_count is not None else ''
-            self.trajectory_label.setText(f'{name} · {count}{len(records)} 个关键点 · {records[-1]["time"]:.1f} 秒')
+            clip = metadata.get('wrist_clip_deg')
+            note = f'\n腕部贴边至 ±90° · 最大修正 {clip:.2f}°' if clip else ''
+            self.trajectory_label.setText(f'{name} · {count}{len(records)} 个关键点 · {records[-1]["time"]:.1f} 秒{note}')
         except FileNotFoundError:
             self.trajectory_label.setText(f'{name} · 空槽位')
         except (OSError, ValueError, TypeError, KeyError, OverflowError):
@@ -213,8 +219,8 @@ class Controls(QDialog):
         if not path or not self.confirm_replace_slot() or self.slot_busy():
             return
         try:
-            records = load_trajectory(path, self.import_format.currentIndex() == 1)
-            save_trajectory(self.teach_library.path(self.teach_slot), records)
+            records, metadata = load_trajectory(path, self.import_format.currentIndex() == 1, include_metadata=True)
+            save_trajectory(self.teach_library.path(self.teach_slot), records, **metadata)
             self.refresh_teach_slots()
         except Exception as e:
             self.owner.error(e)
@@ -237,12 +243,18 @@ class Controls(QDialog):
                 or self.owner.arm.teaching or self.owner.arm.playing):
             self.owner.error('需要新鲜反馈、保持扭矩，并且没有其他回放')
             return
-        if QMessageBox.question(self.owner, '开始回放', '机械臂将先移动到轨迹首帧，然后执行整段动作。确认工作空间已清空？') != QMessageBox.Yes:
-            return
         try:
-            records = self.teach_library.load(self.teach_slot)
+            records, metadata = self.teach_library.load(self.teach_slot, include_metadata=True)
+            message = '机械臂将先移动到轨迹首帧，然后执行整段动作。确认工作空间已清空？'
+            if clip := metadata.get('wrist_clip_deg'):
+                message += f'\n\n这条示教的腕部目标限制在 ±90°，与原录制角度最多相差 {clip:.2f}°。'
+            if QMessageBox.question(self.owner, '开始回放', message) != QMessageBox.Yes:
+                return
+            compensate = self.load_compensation.isChecked()
+            self.load_compensation.setChecked(False)
             self.playback = self.owner.start_worker(Playback(self.owner.shared, self.owner.arm,
-                records, self.factor.value(), self.owner.speed.value(), self.owner.acc.value()))
+                records, self.factor.value(), self.owner.speed.value(), self.owner.acc.value(),
+                load_compensation=compensate))
         except (OSError, ValueError, TypeError, KeyError, OverflowError) as error:
             self.owner.error(error)
 
@@ -298,6 +310,8 @@ class Controls(QDialog):
             self.record_loaded = True
             count = self.teach_record.count if self.teach_record.error is None else None
             self.refresh_teach_slots(count)
+            if self.teach_record.error:
+                self.trajectory_label.setText(self.trajectory_label.text() + f'\n录制失败：{self.teach_record.error}')
         external = self.owner.external_api.teach_status()
         if external is not None and self.owner.external_api.lease:
             status = {'queued': '待执行', 'sent': '执行中', 'reached': '已完成',

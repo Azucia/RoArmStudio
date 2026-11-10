@@ -82,6 +82,28 @@ class Tests(unittest.TestCase):
             arm.join(2)
             self.assertFalse(any(c['T'] == 101 for c in FakeSerial.instances[-1].writes))
 
+    def test_position_query_retries_a_dropped_reply_before_feedback_expires(self):
+        class DropFirstFeedback(FakeSerial):
+            def write(self, raw):
+                result = super().write(raw)
+                if len(self.writes) == 1:
+                    self.buffer.clear()
+                return result
+
+        shared = Shared()
+        with patch('backend.serial.Serial', DropFirstFeedback):
+            arm = Arm(shared, 'TEST')
+            arm.start()
+            try:
+                end = time.monotonic() + 1
+                while shared.pose is None and time.monotonic() < end:
+                    time.sleep(.01)
+                self.assertIsNotNone(shared.pose)
+                self.assertTrue(all(cmd['T'] == 105 for cmd in FakeSerial.instances[-1].writes))
+            finally:
+                arm.stop.set()
+                arm.join(2)
+
     def test_depth_and_capture_roundtrip(self):
         rgb = np.full((8, 12, 3), 100, np.uint8)
         raw = np.full((8, 12), 1234, np.uint16)

@@ -42,7 +42,7 @@ void webCtrlServer(){
         char tmp[CMD_MAX_LEN];
         while (xQueueReceive(cmdQueue, tmp, 0) == pdPASS) {}
     }else if(jsonCmdWebString.indexOf("\"T\":999") != -1)
-    { StopFlag=false;
+    { if (!gripperOvercurrentStop) StopFlag=false;
     }
     else {
         char cmdBuffer[CMD_MAX_LEN];

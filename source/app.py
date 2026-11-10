@@ -11,7 +11,7 @@ from PySide6.QtCore import Qt, QTimer, QSettings, QStandardPaths
 from PySide6.QtGui import QIcon, QImage, QPixmap
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QPushButton,
-    QHBoxLayout, QVBoxLayout, QGridLayout, QComboBox, QSpinBox, QDoubleSpinBox,
+    QHBoxLayout, QVBoxLayout, QGridLayout, QFormLayout, QComboBox, QSpinBox, QDoubleSpinBox,
     QGroupBox, QScrollArea, QFileDialog, QMessageBox, QSlider, QTabBar, QStackedWidget, QFrame, QCheckBox, QScroller, QSizePolicy)
 from serial.tools import list_ports
 from backend import Shared, Arm, UVC, Gemini, Recorder, KEYS, NAMES, LIMITS, joint_command, depth_views
@@ -186,19 +186,12 @@ class Window(QMainWindow):
         l.addLayout(row)
         self.motion.append(self.copy_btn)
         row = QHBoxLayout()
-        row.addWidget(QLabel('速度'))
-        self.speed = QSpinBox()
-        self.speed.setMinimumWidth(62)
-        self.speed.setRange(20, 600)
-        self.speed.setValue(150)
-        self.speed.setToolTip('关节控制与回放：舵机步/秒；XYZ 指令速度由固件处理')
-        row.addWidget(self.speed)
         row.addWidget(QLabel('加速度'))
         self.acc = QSpinBox()
         self.acc.setMinimumWidth(62)
         self.acc.setRange(1, 254)
         self.acc.setValue(5)
-        self.acc.setToolTip('单位：100 步/秒²；只用于关节控制与回放')
+        self.acc.setToolTip('单位：100 步/秒²；用于关节、XYZ 和示教回放')
         row.addWidget(self.acc)
         l.addLayout(row)
         row = QHBoxLayout()
@@ -295,6 +288,16 @@ class Window(QMainWindow):
         QVBoxLayout(device_box).addWidget(device)
         link_page=QWidget()
         link_layout=QVBoxLayout(link_page)
+        motion_box = QGroupBox('机械臂运动')
+        motion_layout = QFormLayout(motion_box)
+        self.speed = QSpinBox()
+        self.speed.setRange(20, 600)
+        self.speed.setValue(self.prefs.value('globalServoSpeed', 150, type=int))
+        self.speed.setSuffix(' 步/秒')
+        self.speed.setToolTip('适用于关节、XYZ、回中、夹爪和示教回放。下次发起动作时生效。')
+        self.speed.valueChanged.connect(self.save_global_speed)
+        motion_layout.addRow('全局舵机限速', self.speed)
+        link_layout.addWidget(motion_box)
         api_box = QGroupBox('对外连接 · 仅本机')
         api_layout = QVBoxLayout(api_box)
         row = QHBoxLayout()
@@ -311,7 +314,6 @@ class Window(QMainWindow):
         self.api_copy = self.button(api_layout, '复制连接信息', self.copy_api_connection)
         self.api_copy.setEnabled(False)
         link_layout.addWidget(api_box)
-        link_layout.addWidget(self.cartesian_pad.computer_mode)
         link_layout.addWidget(self.cartesian_pad.control_settings)
         link_layout.addWidget(self.connection_box)
         link_layout.addWidget(Foldout(device_box))
@@ -416,6 +418,10 @@ class Window(QMainWindow):
         self.api_toggle.setText('停止接口' if server else '启动接口')
         owner = '外部控制中' if self.external_api.lease else '等候外部调用'
         self.api_state.setText(f'127.0.0.1:{server.server_port} · {owner}' if server else '接口未启动')
+
+    def save_global_speed(self, speed):
+        self.prefs.setValue('globalServoSpeed', speed)
+        self.refresh_api()
 
     def note(self, text):
         self.log.appendPlainText(datetime.now().strftime('%H:%M:%S')+'  '+text)
@@ -538,7 +544,7 @@ class Window(QMainWindow):
             if not self.fresh() or self.arm.teaching or self.arm.playing:
                 raise ValueError('夹爪操作需要正常反馈，并先结束示教或回放')
             # Dedicated single-joint command: never move the arm for a gripper click.
-            command = joint_command(5, 180 if close else math.degrees(1.08), 100)
+            command = joint_command(5, 180 if close else math.degrees(1.08), min(100, self.speed.value()))
             command['acc'] = 5
             self.arm.submit(command)
         except Exception as e:
@@ -594,7 +600,8 @@ class Window(QMainWindow):
         if QMessageBox.question(self, f'回中 · 夹爪{direction}',
             f'将移动各关节到回中姿态，夹爪{direction}。请确认整条运动路径和夹爪下方留有空间。') == QMessageBox.Yes:
             try:
-                self.arm.submit(all_command([0, 0, math.pi/2, math.pi/2 if down else 0, 0, math.pi], 100, 5))
+                self.arm.submit(all_command([0, 0, math.pi/2, math.pi/2 if down else 0, 0, math.pi],
+                                            min(100, self.speed.value()), 5))
             except ValueError as e:
                 self.error(e)
 

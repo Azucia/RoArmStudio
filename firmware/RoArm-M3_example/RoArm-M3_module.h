@@ -728,6 +728,11 @@ void RoArmM3_infoFeedback() {
   jsonInfoHttp["tT"] = servoFeedback[WRIST_SERVO_ID - 11].load;
   jsonInfoHttp["tR"] = servoFeedback[ROLL_SERVO_ID - 11].load;
   jsonInfoHttp["tG"] = servoFeedback[GRIPPER_SERVO_ID - 11].load;
+  if (servoFeedback[GRIPPER_SERVO_ID - 11].status) {
+    jsonInfoHttp["gripperCurrentMa"] = servoFeedback[GRIPPER_SERVO_ID - 11].current;
+  }
+  jsonInfoHttp["gripperCurrentWarning"] = gripperCurrentWarning;
+  jsonInfoHttp["gripperOvercurrentStop"] = bool(gripperOvercurrentStop);
 
   jsonInfoHttp["torswitchB"] = servoFeedback[BASE_SERVO_ID - 11].Torquestatus;
   jsonInfoHttp["torswitchS"] = servoFeedback[SHOULDER_DRIVING_SERVO_ID - 11].Torquestatus;
@@ -1008,12 +1013,31 @@ void Stall_detection()
   // {
   //   get_torque(i);
   // }
-  if(servoFeedback[0].current<Protective_current&&servoFeedback[1].current<Protective_current&&servoFeedback[2].current<Protective_current&&servoFeedback[3].current<Protective_current&&servoFeedback[4].current<Protective_current&&servoFeedback[5].current<Protective_current&&servoFeedback[6].current<Protective_current)
-  {
-    Stall_flag=false;
-  }else
-  {
-    Stall_flag=true;
+  const auto &gripper = servoFeedback[GRIPPER_SERVO_ID - 11];
+  if (gripper.status) {
+    bool warning = gripper.current >= GRIPPER_WARNING_CURRENT_MA;
+    if (warning && !gripperCurrentWarning && !gripperOvercurrentStop) {
+      Serial.println("Gripper current warning; motion continues below 3000 mA.");
+    }
+    gripperCurrentWarning = warning;
+    if (!gripperOvercurrentStop && gripper.current >= GRIPPER_STOP_CURRENT_MA) {
+      gripperOvercurrentStop = true;
+      StopFlag = true;
+      studioStopConstantMotion();
+      st.EnableTorque(GRIPPER_SERVO_ID, 0);
+      Serial.println("Gripper overcurrent stop latched at 3000 mA; arm targets retained.");
+    } else if (gripperOvercurrentStop && gripper.Torquestatus != 0) {
+      st.EnableTorque(GRIPPER_SERVO_ID, 0);
+    }
+  }
+  bool armWarning = false;
+  for (int i = 0; i < 7; ++i) {
+    if (servoID[i] != GRIPPER_SERVO_ID && servoFeedback[i].current >= Protective_current) {
+      armWarning = true;
+    }
+  }
+  Stall_flag = armWarning || gripperCurrentWarning || gripperOvercurrentStop;
+  if (armWarning) {
     Serial.println("Servo overcurrent detected. Please power off the device immediately and check for mechanical blockage, obstruction, or excessive load.");
   }
   // if(servoFeedback[0].temper<Protective_temp&&servoFeedback[1].temper<Protective_temp&&servoFeedback[2].temper<Protective_temp&&servoFeedback[3].temper<Protective_temp&&servoFeedback[4].temper<Protective_temp)
